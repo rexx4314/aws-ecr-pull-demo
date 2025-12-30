@@ -228,4 +228,6 @@ DELETE /api/docker/images
 5. `/api/docker/images`
 6. `/api/docker/images` (DELETE, 선택)
 
+> resources/script/ecr-pull-test.http
+
 ---
