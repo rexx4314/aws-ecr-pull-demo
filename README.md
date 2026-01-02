@@ -1,233 +1,58 @@
-# AWS ECR Pull Demo (Spring Boot)
+# AWS ECR Demo Projects (Spring Boot)
 
-## 1. 프로젝트 개요
-
-* AWS ECR Repository 전체 조회
-* Repository별 최신 tag 계산
-* AWS 인증 정보 기반 실제 `docker pull` 실행
-* 로컬 Docker 이미지 조회
-* 로컬 Docker 이미지 삭제
-* 모든 동작을 REST API로 제어
+- 이 저장소는 AWS ECR 연동 데모를 **2가지 방식**으로 제공합니다.
+- 각 방식은 별도 브랜치에서 독립적으로 관리됩니다.
 
 ---
 
-## 2. 아키텍처 개요
+## 브랜치 구성
 
-```
-Client (IntelliJ HTTP Client)
-        ↓
-Spring Boot API
-        ↓
-AWS SDK (ECR)
- - DescribeRepositories
- - DescribeImages
-        ↓
-Docker CLI
- - docker login
- - docker pull
- - docker images
- - docker rmi
-        ↓
-Local Docker Engine
-```
-
-* 이미지 저장 위치: 로컬 Docker 엔진
-* 애플리케이션 내부 저장 없음
-* 프로젝트 디렉터리 파일 생성 없음
+| 브랜치 | 프로젝트명 | 핵심 방식 | Docker 필요 | 주요 산출물 |
+|---|---|---|---|---|
+| `feat/ecr-docker-cli-pull-demo` | ECR Docker CLI Pull Demo | Docker CLI(ProcessBuilder)로 `docker pull` 실행 | 필요 | 로컬 Docker Engine 이미지 |
+| `feat/ecr-layer-stream-downloader` | ECR Layer Stream Downloader | ECR API + HTTP Stream으로 레이어/manifest 저장 | 레이어 다운로드는 불필요 (export는 로컬 tar 생성) | `./out`에 manifest/blobs/config + tar(export) |
 
 ---
 
-## 3. 실행 환경
+## 브랜치 상세 설명
 
-### 3.1 시스템 요구 사항
+### 1) “운영 환경과 동일한 docker pull”
+- 브랜치: `feat/ecr-docker-cli-pull-demo`
+- 특징:
+  - `docker login / docker pull`을 실제로 실행
+  - Docker Desktop/Engine 필수
+  - 로컬 이미지 조회/삭제까지 포함
 
-* Java 21
-* Docker Desktop 또는 Docker Engine
-* AWS ECR 접근 가능한 IAM User
-* Access Key / Secret Key
-* ECR 네트워크 접근 가능
-
-#### 로컬 테스트 환경
-
-> * Windows 11 Pro
-> * Java 21.0.9 (IntelliJ 내장 Amazon Corretto)
-> * Spring boot 3.5.3
-> * AWS SDK ECR 2.32.7
-> * Docker Desktop 29.1.3
-
-### 3.2 Docker 사전 조건
-
-```bash
-docker version
-docker ps
-```
-
-* 위 명령 정상 동작 필수
+### 2) “Docker 없이 레이어를 받아서 파일로 보관/가공”
+- 브랜치: `feat/ecr-layer-stream-downloader`
+- 특징:
+  - manifest / layer blobs / config(옵션) 저장
+  - SHA256 검증(옵션)
+  - 저장된 결과를 기반으로 docker save 포맷 tar(export) 생성
 
 ---
 
-## 4. API 목록
+## 공통 실행 환경
 
-### 4.1 Docker Health Check
+- Java 21
+- AWS ECR 접근 가능한 IAM User (Access Key / Secret Key)
+- ECR 네트워크 접근 가능
 
-* 목적: Docker 데몬 동작 여부 확인
+로컬 테스트 환경(공통)
+- Windows 11 Pro
+- Java 21.0.9 (IntelliJ 내장 Amazon Corretto)
+- Spring Boot 3.5.3
+- AWS SDK ECR 2.32.7
 
-```
-GET /api/health/docker
-```
-
-응답 예시:
-
-```json
-{
-  "ok": true,
-  "message": "Docker OK (server=29.1.3)"
-}
-```
+※ Docker CLI Pull Demo 브랜치는 추가로 Docker Desktop 29.1.3을 사용합니다.
 
 ---
 
-### 4.2 ECR Repository + 최신 tag 조회
+## 시작 방법
 
-* 입력값:
+각 브랜치로 이동한 뒤, 해당 브랜치의 README를 참고하세요.
 
-    * region
-    * accountId
-    * accessKeyId
-    * secretAccessKey
-* 처리:
-
-    * 모든 Repository 조회
-    * Repository별 최신 tag 계산
-    * 이미지 없는 Repository는 pull 불가 처리
-
-```
-POST /api/ecr/repositories
-```
-
-요청 예시:
-
-```json
-{
-  "region": "ap-northeast-2",
-  "accountId": "194356581254",
-  "accessKeyId": "AKIA...",
-  "secretAccessKey": "xxxx"
-}
-```
-
-응답 요약:
-
-```json
-{
-  "repositoryName": "demo/rex-repo",
-  "latestTag": "v1",
-  "pullable": true
-}
-```
-
-* pullable=false 조건
-
-    * 이미지 없음
-    * 최신 tag 판단 불가
-
----
-
-### 4.3 ECR 이미지 Pull
-
-* 입력값:
-
-    * region
-    * accountId
-    * accessKeyId
-    * secretAccessKey
-    * repositoryName
-    * tag
-* 처리:
-
-    * ECR 로그인
-    * docker login
-    * docker pull
-    * digest 확인
-
-```
-POST /api/ecr/pull
-```
-
-응답 예시:
-
-```json
-{
-  "imageRef": ".../rex-repo:v1",
-  "resolvedTag": "v1",
-  "digest": "...@sha256:...",
-  "message": "SUCCESS"
-}
-```
-
-* 이미지 저장 위치: 로컬 Docker 엔진
-* 애플리케이션 파일 생성 없음
-
----
-
-### 4.4 로컬 Docker 이미지 조회
-
-* 전체 조회
-
-```
-GET /api/docker/images
-```
-
-* Repository 필터 조회
-
-```
-GET /api/docker/images?containsRepo=demo/rex-repo
-```
-
-응답 예시:
-
-```json
-{
-  "repository": ".../rex-repo",
-  "tag": "v1",
-  "imageId": "547c8c6863a8",
-  "size": "123MB"
-}
-```
-
----
-
-### 4.5 로컬 Docker 이미지 삭제
-
-```
-DELETE /api/docker/images
-```
-
-요청 예시:
-
-```json
-{
-  "imageRef": ".../rex-repo:v1",
-  "force": false
-}
-```
-
-* 삭제 기준
-
-    * repo:tag
-    * 또는 repo@sha256:digest
-
----
-
-## 5. IntelliJ HTTP Client 테스트 순서
-
-1. `/api/health/docker`
-2. `/api/ecr/repositories`
-3. pullable=true repo 선택
-4. `/api/ecr/pull`
-5. `/api/docker/images`
-6. `/api/docker/images` (DELETE, 선택)
-
-> resources/script/ecr-pull-test.http
+- `feat/ecr-docker-cli-pull-demo` → Docker CLI 기반 pull 데모
+- `feat/ecr-layer-stream-downloader` → 레이어 스트리밍 다운로드 + tar export
 
 ---
