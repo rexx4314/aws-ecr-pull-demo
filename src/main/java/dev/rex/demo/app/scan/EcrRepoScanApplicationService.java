@@ -1,9 +1,9 @@
-package dev.rex.demo.ecr.service;
+package dev.rex.demo.app.scan;
 
 import dev.rex.demo.ecr.api.dto.EcrRepoItem;
 import dev.rex.demo.ecr.api.dto.EcrRepoScanRequest;
 import dev.rex.demo.ecr.api.dto.EcrRepoScanResponse;
-import dev.rex.demo.ecr.infrastructure.EcrClientFactory;
+import dev.rex.demo.infra.aws.EcrClientFactory;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -26,7 +26,7 @@ import java.util.Objects;
 @Slf4j
 @Service
 @RequiredArgsConstructor
-public class EcrRepoScanService {
+public class EcrRepoScanApplicationService {
 
     private static final String TAG_LATEST = "latest";
 

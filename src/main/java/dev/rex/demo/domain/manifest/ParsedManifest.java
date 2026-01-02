@@ -1,4 +1,4 @@
-package dev.rex.demo.ecr.manifest;
+package dev.rex.demo.domain.manifest;
 
 import java.util.List;
 

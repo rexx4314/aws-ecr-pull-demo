@@ -1,4 +1,4 @@
-package dev.rex.demo.ecr.infrastructure;
+package dev.rex.demo.infra.aws;
 
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Value;

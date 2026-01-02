@@ -1,11 +1,14 @@
-package dev.rex.demo.ecr.download;
+package dev.rex.demo.infra.fs;
 
+import dev.rex.demo.common.error.ApiException;
+import dev.rex.demo.common.error.ErrorCode;
 import dev.rex.demo.common.util.Masking;
 import dev.rex.demo.common.util.Retry;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import software.amazon.awssdk.core.exception.SdkClientException;
 import software.amazon.awssdk.services.ecr.EcrClient;
 import software.amazon.awssdk.services.ecr.model.EcrException;
 import software.amazon.awssdk.services.ecr.model.GetDownloadUrlForLayerRequest;
@@ -19,12 +22,16 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
+import java.nio.file.AccessDeniedException;
+import java.nio.file.FileSystemException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.time.Duration;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -66,10 +73,10 @@ public class BlobDownloader {
         Objects.requireNonNull(targetPath, "targetPath");
 
         String repo = StringUtils.trimToNull(repositoryName);
-        if (repo == null) throw new IllegalArgumentException("repositoryName은 필수입니다.");
+        if (repo == null) throw new ApiException(ErrorCode.INVALID_REQUEST, "repositoryName은 필수입니다.");
 
         String digest = StringUtils.trimToNull(layerDigest);
-        if (digest == null) throw new IllegalArgumentException("layerDigest는 필수입니다.");
+        if (digest == null) throw new ApiException(ErrorCode.INVALID_REQUEST, "layerDigest는 필수입니다.");
 
         int retries = Math.max(1, maxRetries);
         int timeoutSec = (httpTimeoutSeconds <= 0) ? 180 : httpTimeoutSeconds;
@@ -82,9 +89,10 @@ public class BlobDownloader {
         DownloadLayout.mkdirs(targetPath.getParent());
 
         for (int attempt = 1; attempt <= retries; attempt++) {
+            HttpResponse<InputStream> resp = null;
             try {
                 // 1차: Authorization 없이
-                HttpResponse<InputStream> resp = sendGet(downloadUrl, timeoutSec, false, basicAuthToken);
+                resp = sendGet(downloadUrl, timeoutSec, false, basicAuthToken);
                 int code = resp.statusCode();
 
                 // 2차: 401/403이면 Basic 시도
@@ -97,17 +105,29 @@ public class BlobDownloader {
                 // 재시도 대상 코드
                 if (code == 429 || (code >= 500 && code <= 599)) {
                     closeQuiet(resp);
-                    throw new RetryableHttpException("retryable http status=" + code);
+                    throw new RetryableHttpException(code, "retryable http status=" + code);
                 }
 
-                // 실패 코드
+                // 실패 코드 (재시도 대상 아님)
                 if (code < 200 || code >= 300) {
                     URI uri = URI.create(downloadUrl);
                     closeQuiet(resp);
-                    throw new IllegalStateException(
+
+                    ErrorCode ec;
+                    if (code == 401 || code == 403) ec = ErrorCode.DOWNLOAD_UNAUTHORIZED;
+                    else if (code == 404) ec = ErrorCode.DOWNLOAD_ECR_BLOB_NOT_FOUND;
+                    else ec = ErrorCode.DOWNLOAD_HTTP_UNEXPECTED_STATUS;
+
+                    throw new ApiException(
+                            ec,
                             "HTTP 다운로드 실패 status=" + code +
                                     ", host=" + safeHost(uri) +
-                                    ", digest=" + Masking.maskDigest(digest)
+                                    ", digest=" + Masking.maskDigest(digest),
+                            Map.of(
+                                    "status", code,
+                                    "host", safeHost(uri),
+                                    "digest", Masking.maskDigest(digest)
+                            )
                     );
                 }
 
@@ -119,7 +139,7 @@ public class BlobDownloader {
 
                 // sha256 검증
                 if (verifySha256) {
-                    verifySha256(digest, computedHex, tmp);
+                    verifySha256OrThrow(digest, computedHex, tmp);
                 }
 
                 // 커밋(rename)
@@ -130,40 +150,97 @@ public class BlobDownloader {
 
             } catch (RetryableHttpException re) {
                 safeDelete(tmp);
+
+                ErrorCode finalCode = (re.status == 429) ? ErrorCode.DOWNLOAD_ECR_THROTTLED : ErrorCode.DOWNLOAD_HTTP_UNEXPECTED_STATUS;
+
                 if (attempt >= retries) {
-                    throw new IllegalStateException("HTTP 재시도 초과: " + re.getMessage()
-                            + ", digest=" + Masking.maskDigest(digest), re);
+                    throw new ApiException(
+                            finalCode,
+                            "HTTP 재시도 초과: status=" + re.status + ", digest=" + Masking.maskDigest(digest),
+                            Map.of("status", re.status, "digest", Masking.maskDigest(digest)),
+                            re
+                    );
                 }
                 backoffAndSleep(attempt, retries, digest, re.getMessage());
 
             } catch (HttpTimeoutException te) {
                 safeDelete(tmp);
                 if (attempt >= retries) {
-                    throw new IllegalStateException("HTTP timeout 재시도 초과: " + te.getMessage()
-                            + ", digest=" + Masking.maskDigest(digest), te);
+                    throw new ApiException(
+                            ErrorCode.DOWNLOAD_HTTP_TIMEOUT,
+                            "HTTP timeout 재시도 초과: " + te.getMessage() + ", digest=" + Masking.maskDigest(digest),
+                            Map.of("digest", Masking.maskDigest(digest)),
+                            te
+                    );
                 }
                 backoffAndSleep(attempt, retries, digest, te.getMessage());
 
             } catch (InterruptedException ie) {
                 safeDelete(tmp);
                 Thread.currentThread().interrupt();
-                throw new IllegalStateException("다운로드 중단(Interrupted). digest=" + Masking.maskDigest(digest), ie);
+                throw new ApiException(
+                        ErrorCode.DOWNLOAD_THREAD_INTERRUPTED,
+                        "다운로드 중단(Interrupted). digest=" + Masking.maskDigest(digest),
+                        Map.of("digest", Masking.maskDigest(digest)),
+                        ie
+                );
+
+            } catch (AccessDeniedException ade) {
+                safeDelete(tmp);
+                throw new ApiException(
+                        ErrorCode.DOWNLOAD_FS_PERMISSION_DENIED,
+                        "파일 권한 오류: " + ade.getMessage() + ", digest=" + Masking.maskDigest(digest),
+                        Map.of("digest", Masking.maskDigest(digest), "path", String.valueOf(targetPath)),
+                        ade
+                );
+
+            } catch (FileSystemException fse) {
+                safeDelete(tmp);
+                ErrorCode fsCode = classifyFileSystemException(fse);
+                throw new ApiException(
+                        fsCode,
+                        "파일 시스템 오류: " + safeFsMsg(fse) + ", digest=" + Masking.maskDigest(digest),
+                        Map.of("digest", Masking.maskDigest(digest), "path", String.valueOf(targetPath)),
+                        fse
+                );
 
             } catch (IOException ioe) {
                 safeDelete(tmp);
+                // HTTP send 중 IOException이면 네트워크로 보는게 일반적
+                // 파일 I/O에서 올라오는 IOException은 위 AccessDenied/FileSystemException에서 대부분 걸러짐
                 if (attempt >= retries) {
-                    throw new IllegalStateException("다운로드 I/O 재시도 초과: " + ioe.getMessage()
-                            + ", digest=" + Masking.maskDigest(digest), ioe);
+                    throw new ApiException(
+                            ErrorCode.DOWNLOAD_HTTP_CONNECTION_FAILED,
+                            "다운로드 I/O 재시도 초과: " + ioe.getMessage() + ", digest=" + Masking.maskDigest(digest),
+                            Map.of("digest", Masking.maskDigest(digest)),
+                            ioe
+                    );
                 }
                 backoffAndSleep(attempt, retries, digest, ioe.getMessage());
 
+            } catch (ApiException ae) {
+                safeDelete(tmp);
+                throw ae;
+
             } catch (RuntimeException ex) {
                 safeDelete(tmp);
-                throw ex;
+                throw new ApiException(
+                        ErrorCode.DOWNLOAD_TASK_FAILED,
+                        "다운로드 실패: " + ex.getMessage() + ", digest=" + Masking.maskDigest(digest),
+                        Map.of("digest", Masking.maskDigest(digest)),
+                        ex
+                );
+
+            } finally {
+                closeQuiet(resp);
             }
         }
 
-        throw new IllegalStateException("Unexpected downloader exit. digest=" + Masking.maskDigest(digest));
+        throw new ApiException(
+                ErrorCode.DOWNLOAD_TASK_FAILED,
+                "Unexpected downloader exit. digest=" + Masking.maskDigest(digest),
+                Map.of("digest", Masking.maskDigest(digest))
+        );
     }
 
     // ECR URL 획득
@@ -177,12 +254,34 @@ public class BlobDownloader {
 
             String url = StringUtils.trimToNull(u.downloadUrl());
             if (url == null) {
-                throw new IllegalStateException("GetDownloadUrlForLayer 결과 downloadUrl이 비었습니다. digest=" + Masking.maskDigest(digest));
+                throw new ApiException(
+                        ErrorCode.DOWNLOAD_ECR_API_FAILED,
+                        "GetDownloadUrlForLayer 결과 downloadUrl이 비었습니다. digest=" + Masking.maskDigest(digest),
+                        Map.of("digest", Masking.maskDigest(digest))
+                );
             }
             return url;
 
         } catch (EcrException ee) {
-            throw new IllegalStateException("ECR GetDownloadUrlForLayer 실패: " + safeAwsMsg(ee), ee);
+            ErrorCode ec = classifyEcrException(ee);
+            throw new ApiException(
+                    ec,
+                    "ECR GetDownloadUrlForLayer 실패: " + safeAwsMsg(ee),
+                    Map.of(
+                            "status", ee.statusCode(),
+                            "digest", Masking.maskDigest(digest),
+                            "repo", repo
+                    ),
+                    ee
+            );
+
+        } catch (SdkClientException sce) {
+            throw new ApiException(
+                    ErrorCode.DOWNLOAD_HTTP_CONNECTION_FAILED,
+                    "ECR GetDownloadUrlForLayer 호출 중 클라이언트 오류: " + sce.getMessage(),
+                    Map.of("digest", Masking.maskDigest(digest), "repo", repo),
+                    sce
+            );
         }
     }
 
@@ -233,16 +332,27 @@ public class BlobDownloader {
     }
 
     // SHA256 검증
-    private void verifySha256(String digest, String computedHex, Path tmp) {
+    private void verifySha256OrThrow(String digest, String computedHex, Path tmp) {
         String expectedHex = stripSha256Prefix(digest);
         if (computedHex == null) {
             safeDelete(tmp);
-            throw new IllegalStateException("SHA256 계산 결과가 null입니다(verifySha256=true). digest=" + Masking.maskDigest(digest));
+            throw new ApiException(
+                    ErrorCode.DOWNLOAD_CORRUPTED_CONTENT,
+                    "SHA256 계산 결과가 null입니다(verifySha256=true). digest=" + Masking.maskDigest(digest),
+                    Map.of("digest", Masking.maskDigest(digest))
+            );
         }
         if (!expectedHex.equalsIgnoreCase(computedHex)) {
             safeDelete(tmp);
-            throw new IllegalStateException("SHA256 불일치. digest=" + Masking.maskDigest(digest)
-                    + ", expected=" + expectedHex + ", actual=" + computedHex);
+            throw new ApiException(
+                    ErrorCode.DOWNLOAD_DIGEST_MISMATCH,
+                    "SHA256 불일치. digest=" + Masking.maskDigest(digest),
+                    Map.of(
+                            "digest", Masking.maskDigest(digest),
+                            "expected", expectedHex,
+                            "actual", computedHex
+                    )
+            );
         }
     }
 
@@ -251,6 +361,7 @@ public class BlobDownloader {
         try {
             Files.move(tmp, targetPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         } catch (IOException atomicFail) {
+            // 일부 FS에서 ATOMIC_MOVE 미지원
             Files.move(tmp, targetPath, StandardCopyOption.REPLACE_EXISTING);
         }
     }
@@ -261,6 +372,48 @@ public class BlobDownloader {
         log.warn("Retry download. attempt={}/{}, digest={}, reason={}, backoffMs={}",
                 attempt, retries, Masking.maskDigest(digest), reason, backoff);
         Retry.sleepQuiet(backoff);
+    }
+
+    private ErrorCode classifyEcrException(EcrException e) {
+        if (e == null) return ErrorCode.DOWNLOAD_ECR_API_FAILED;
+
+        int sc = e.statusCode();
+        String awsCode = (e.awsErrorDetails() != null) ? e.awsErrorDetails().errorCode() : null;
+
+        if (sc == 401 || sc == 403) return ErrorCode.DOWNLOAD_UNAUTHORIZED;
+
+        if (sc == 429 || "ThrottlingException".equals(awsCode) || "TooManyRequestsException".equals(awsCode)) {
+            return ErrorCode.DOWNLOAD_ECR_THROTTLED;
+        }
+
+        // GetDownloadUrlForLayer에서 주로 발생하는 예외들(환경마다 awsCode가 다를 수 있음)
+        if ("RepositoryNotFoundException".equals(awsCode)) return ErrorCode.DOWNLOAD_ECR_REPOSITORY_NOT_FOUND;
+        if ("LayerNotFoundException".equals(awsCode) || "ImageNotFoundException".equals(awsCode)) return ErrorCode.DOWNLOAD_ECR_BLOB_NOT_FOUND;
+
+        if (sc == 404) return ErrorCode.DOWNLOAD_ECR_BLOB_NOT_FOUND;
+
+        return ErrorCode.DOWNLOAD_ECR_API_FAILED;
+    }
+
+    private ErrorCode classifyFileSystemException(FileSystemException fse) {
+        String reason = safeFsMsg(fse);
+        String r = (reason == null) ? "" : reason.toLowerCase();
+
+        // 운영체제/FS에 따라 메시지가 다르므로 보수적으로 처리
+        if (r.contains("no space") || r.contains("not enough space") || r.contains("disk full") || r.contains("insufficient space")) {
+            return ErrorCode.DOWNLOAD_FS_NO_SPACE;
+        }
+        if (r.contains("permission") || r.contains("access is denied") || r.contains("denied")) {
+            return ErrorCode.DOWNLOAD_FS_PERMISSION_DENIED;
+        }
+        return ErrorCode.DOWNLOAD_FS_WRITE_FAILED;
+    }
+
+    private String safeFsMsg(FileSystemException e) {
+        if (e == null) return null;
+        if (StringUtils.isNotBlank(e.getReason())) return e.getReason();
+        String m = e.getMessage();
+        return (m == null) ? "" : m;
     }
 
     private String toHex(byte[] b) {
@@ -307,8 +460,11 @@ public class BlobDownloader {
     }
 
     private static class RetryableHttpException extends RuntimeException {
-        private RetryableHttpException(String msg) {
+        final int status;
+
+        private RetryableHttpException(int status, String msg) {
             super(msg);
+            this.status = status;
         }
     }
 }

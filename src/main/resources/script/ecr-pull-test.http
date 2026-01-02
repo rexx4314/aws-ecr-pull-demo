@@ -1,15 +1,30 @@
 ###
 # =====================================================================
-# ECR Layer Stream Downloader - IntelliJ HTTP Client
+# ECR Layer Stream Downloader - IntelliJ HTTP Client (FINAL)
 # - 기능:
-#   1) ECR repo 전체 + 최신 tag 조회
+#   1) ECR repo 전체 + 최신 tag 조회 (안전 정렬 적용)
 #   2) ECR 레이어 다운로드(스트리밍) + manifest/blobs 저장 + sha256 검증
+#   3) docker save tar(export) 생성 후 다운로드 (docker load 가능)
+# - 반영:
+#   A) scanOk=false면 repo/tag 비우기
+#   B) export에도 outputDir/includeConfig/verifySha256 명시
+#   C) fileNameHint 안전화(/ 제거)
+#   D) export 응답 저장 스크립트 제거 + X-Server-Tar-Path 헤더 출력
 # =====================================================================
 
 ###
 # ---------------------------------------------------------------------
+# 0) 전역 변수 예시
+# ---------------------------------------------------------------------
+# @host = http://localhost:8080
+# @region = ap-northeast-2
+# @accountId = 123456789012
+# @accessKeyId = AKIA....
+# @secretAccessKey = ....
+
+###
+# ---------------------------------------------------------------------
 # 1) Repo 스캔
-#   - pullable=true && latestTag!=null 인 repo만 자동 선택
 # ---------------------------------------------------------------------
 # @name scanReposWithLatestTag
 POST {{host}}/api/ecr/scan
@@ -20,33 +35,87 @@ Accept: application/json
   "region": "{{region}}",
   "accountId": "{{accountId}}",
   "accessKeyId": "{{accessKeyId}}",
-  "secretAccessKey": "{{secretAccessKey}}",
-  "maxPages": 50,
-  "maxImages": 2000
+  "secretAccessKey": "{{secretAccessKey}}"
 }
 
 > {%
-    if (response.body && response.body.code) {
-        client.log("Scan failed. code=" + response.body.code + ", msg=" + response.body.message);
-        client.log("details=" + JSON.stringify(response.body.details || {}));
+    function toMs(v) {
+        // null/blank/파싱 실패 → null
+        if (!v) return null;
+        const t = Date.parse(v);
+        return isNaN(t) ? null : t;
+    }
+
+    function safeStr(v) {
+        return (v === null || v === undefined) ? "" : String(v);
+    }
+
+    function setFail() {
+        // 실패 시 전역 비우기
         client.global.set("repositoryName", "");
         client.global.set("tag", "");
         client.global.set("scanOk", "false");
+    }
+
+    if (response.body && response.body.code) {
+        client.log("Scan failed. code=" + response.body.code + ", msg=" + response.body.message);
+        client.log("details=" + JSON.stringify(response.body.details || {}));
+        setFail();
     } else {
         const items = (response.body && response.body.items) ? response.body.items : [];
-        const candidates = items.filter(it => it && it.pullable === true && it.latestTag);
+
+        // 후보 구성
+        const candidates = items
+            .filter(it => it && it.pullable === true && it.latestTag)
+            .map(it => ({
+                repositoryName: it.repositoryName,
+                latestTag: it.latestTag,
+                lastPushedAt: it.lastPushedAt,
+                pushedAtMs: toMs(it.lastPushedAt)
+            }));
 
         if (candidates.length === 0) {
             client.log("No PULLABLE repos.");
-            client.global.set("repositoryName", "");
-            client.global.set("tag", "");
-            client.global.set("scanOk", "false");
+            setFail();
         } else {
+            // 안전 정렬
+            candidates.sort((a, b) => {
+                const aHas = a.pushedAtMs !== null;
+                const bHas = b.pushedAtMs !== null;
+
+                // 1) null은 뒤로
+                if (aHas !== bHas) return aHas ? -1 : 1;
+
+                // 2) 최신 우선
+                if (aHas && bHas && a.pushedAtMs !== b.pushedAtMs) {
+                    return b.pushedAtMs - a.pushedAtMs;
+                }
+
+                // 3) 동률이면 repoName 오름차순
+                const ar = safeStr(a.repositoryName).toLowerCase();
+                const br = safeStr(b.repositoryName).toLowerCase();
+                if (ar < br) return -1;
+                if (ar > br) return 1;
+                return 0;
+            });
+
             const picked = candidates[0];
+
             client.global.set("repositoryName", picked.repositoryName);
             client.global.set("tag", picked.latestTag);
             client.global.set("scanOk", "true");
-            client.log("Picked repo=" + picked.repositoryName + ", tag=" + picked.latestTag);
+
+            client.log("Picked repo=" + picked.repositoryName
+                + ", tag=" + picked.latestTag
+                + ", lastPushedAt=" + (picked.lastPushedAt || "(null)")
+            );
+
+            // 상위 5개 로그
+            const top = candidates.slice(0, 5).map((x, i) =>
+                "#" + (i + 1) + " " + x.repositoryName + ":" + x.latestTag
+                + " pushedAt=" + (x.lastPushedAt || "(null)")
+            );
+            client.log("Top candidates: " + top.join(" | "));
         }
     }
 %}
@@ -58,7 +127,6 @@ Accept: application/json
 ###
 # ---------------------------------------------------------------------
 # 2) 레이어 다운로드
-#   - scanOk=false 또는 repo/tag가 비면 호출 막음
 # ---------------------------------------------------------------------
 # @name downloadLayers
 POST {{host}}/api/ecr/download
@@ -70,6 +138,7 @@ Accept: application/json
   "accountId": "{{accountId}}",
   "accessKeyId": "{{accessKeyId}}",
   "secretAccessKey": "{{secretAccessKey}}",
+
   "repositoryName": "{{repositoryName}}",
   "tag": "{{tag}}",
 
@@ -87,7 +156,6 @@ Accept: application/json
 }
 
 > {%
-    // scan 실패했으면 로그만 남김
     if (client.global.get("scanOk") !== "true") {
         client.log("⚠️ Skip download: scanOk is not true. repositoryName/tag is empty or scan failed.");
     }
@@ -95,7 +163,7 @@ Accept: application/json
     if (response.body && response.body.code) {
         client.log("Download failed. code=" + response.body.code + ", msg=" + response.body.message);
         client.log("details=" + JSON.stringify(response.body.details || {}));
-    } else {
+    } else if (response.body) {
         client.log("resolvedTag=" + response.body.resolvedTag);
         client.log("resolvedDigest=" + response.body.resolvedDigest);
         client.log("layerCount=" + response.body.layerCount);
@@ -104,5 +172,63 @@ Accept: application/json
         client.log("manifestPath=" + response.body.manifestPath);
         client.log("configPath=" + response.body.configPath);
         client.log("message=" + response.body.message);
+    } else {
+        client.log("Download response body is empty.");
+    }
+%}
+
+###
+# ---------------------------------------------------------------------
+# 3) docker save tar(export) 다운로드
+# ---------------------------------------------------------------------
+# @name exportDockerSaveTar
+POST {{host}}/api/ecr/export/docker-save
+Content-Type: application/json
+Accept: application/x-tar
+
+{
+  "region": "{{region}}",
+  "accountId": "{{accountId}}",
+  "accessKeyId": "{{accessKeyId}}",
+  "secretAccessKey": "{{secretAccessKey}}",
+
+  "repositoryName": "{{repositoryName}}",
+  "tag": "{{tag}}",
+  "resolveLatest": false,
+
+  "includeConfig": true,
+  "verifySha256": true,
+  "outputDir": "./out",
+
+  "repoTag": "{{repositoryName}}:{{tag}}",
+  "fileNameHint": "docker-save_{{tag}}.tar",
+
+  "httpTimeoutSeconds": 180,
+  "maxRetries": 4,
+  "maxPages": 50,
+  "maxImages": 2000
+}
+
+> {%
+    if (client.global.get("scanOk") !== "true") {
+        client.log("⚠️ Skip export: scanOk is not true. repositoryName/tag is empty or scan failed.");
+    }
+
+    const ct = (response.headers && response.headers.valueOf("Content-Type"))
+        ? response.headers.valueOf("Content-Type")
+        : "";
+
+    const serverPath = (response.headers && response.headers.valueOf("X-Server-Tar-Path"))
+        ? response.headers.valueOf("X-Server-Tar-Path")
+        : "";
+
+    // JSON 에러면 출력
+    if (ct.includes("application/json") && response.body && response.body.code) {
+        client.log("Export failed. code=" + response.body.code + ", msg=" + response.body.message);
+        client.log("details=" + JSON.stringify(response.body.details || {}));
+    } else {
+        client.log("Export OK. Content-Type=" + ct);
+        client.log("Server tar path=" + (serverPath || "(missing header)"));
+        client.log("Tip: Use 'Save Response' in IntelliJ to save the tar locally.");
     }
 %}

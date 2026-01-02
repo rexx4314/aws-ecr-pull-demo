@@ -1,4 +1,4 @@
-package dev.rex.demo.ecr.service;
+package dev.rex.demo.domain.image;
 
 import dev.rex.demo.common.error.ApiException;
 import dev.rex.demo.common.error.ErrorCode;

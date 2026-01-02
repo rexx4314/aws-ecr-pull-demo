@@ -1,4 +1,4 @@
-package dev.rex.demo.ecr.download;
+package dev.rex.demo.infra.fs;
 
 import org.apache.commons.lang3.StringUtils;
 
@@ -9,30 +9,22 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Objects;
 
-/**
- * 다운로드 저장 레이아웃
- * - root/account/region/repo/folderKey/...
- * - blobs/sha256/<hex>
- */
 public class DownloadLayout {
 
     private final Path basePath;
 
     public DownloadLayout(Path rootDir, String accountId, String region, String repositoryName, String folderKey) {
         Objects.requireNonNull(rootDir, "rootDir");
-
-        // 경로 조립
         this.basePath = rootDir
                 .resolve(safe(accountId))
                 .resolve(safe(region))
                 .resolve(repoAsPath(repositoryName))
                 .resolve(safe(folderKey));
 
-        // 기본 폴더 생성
-        mkdirs(this.basePath.resolve("blobs").resolve("sha256"));
+        mkdirs(this.basePath.resolve("blobs").resolve("sha256")); // blobs dir
+        mkdirs(this.basePath.resolve("export").resolve("docker-save")); // export dir
     }
 
-    // 디렉토리 생성
     public static void mkdirs(Path dir) {
         if (dir == null) return;
         try {
@@ -42,7 +34,6 @@ public class DownloadLayout {
         }
     }
 
-    // digest -> hex
     private static String digestHex(String digest) {
         String d = StringUtils.trimToNull(digest);
         if (d == null) throw new IllegalArgumentException("digest null");
@@ -50,18 +41,16 @@ public class DownloadLayout {
         return d;
     }
 
-    // 경로 안전 보정
     private static String safe(String s) {
         String t = StringUtils.trimToNull(s);
         if (t == null) return "_";
-        return t.replace("..", "_").replace(":", "_");
+        return t.replace("..", "_").replace(":", "_"); // path sanitize
     }
 
-    // repo "/" 지원
     private static Path repoAsPath(String repo) {
         String t = StringUtils.trimToNull(repo);
         if (t == null) return Path.of("_");
-        return Path.of(t);
+        return Path.of(t); // allow nested
     }
 
     public Path basePath() {
@@ -69,12 +58,11 @@ public class DownloadLayout {
     }
 
     public Path manifestPath() {
-        return basePath.resolve("manifest.json");
+        return basePath.resolve("manifest.json"); // ecr manifest
     }
 
     public Path configPath() {
-        // config blob 원문 저장
-        return basePath.resolve("config.json");
+        return basePath.resolve("config.json"); // config blob raw
     }
 
     public Path blobPathForDigest(String digest) {
@@ -82,17 +70,24 @@ public class DownloadLayout {
         return basePath.resolve("blobs").resolve("sha256").resolve(hex);
     }
 
-    // 문자열 파일 저장
+    public Path exportDockerSaveDir() {
+        return basePath.resolve("export").resolve("docker-save"); // export docker-save
+    }
+
+    public Path exportDockerSaveTarPath(String fileName) {
+        String fn = StringUtils.trimToNull(fileName);
+        if (fn == null) fn = "image.tar";
+        if (!fn.endsWith(".tar")) fn = fn + ".tar";
+        Path dir = exportDockerSaveDir();
+        mkdirs(dir);
+        return dir.resolve(fn); // tar path
+    }
+
     public void writeString(Path p, String text) {
         try {
             mkdirs(p.getParent());
-            Files.writeString(
-                    p,
-                    (text == null) ? "" : text,
-                    StandardCharsets.UTF_8,
-                    StandardOpenOption.CREATE,
-                    StandardOpenOption.TRUNCATE_EXISTING
-            );
+            Files.writeString(p, text, StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
         } catch (IOException e) {
             throw new IllegalStateException("파일 저장 실패: " + p + ", err=" + e.getMessage(), e);
         }
