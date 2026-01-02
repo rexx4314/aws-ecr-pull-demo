@@ -1,6 +1,6 @@
 ###
 # =====================================================================
-# AWS ECR Pull Demo - IntelliJ HTTP Client
+# ECR Docker CLI Pull Demo - IntelliJ HTTP Client
 # - 실제 데모 프로젝트 API만 테스트
 # - 포함 기능:
 #   0) Docker health
@@ -43,7 +43,7 @@ Accept: application/json
     const candidates = items.filter(it => it && it.pullable === true && it.latestTag);
 
     if (candidates.length === 0) {
-        client.log("❌ No PULLABLE repositories found.");
+        client.log("No PULLABLE repositories found.");
         client.log("   - All repos may be empty (no images), scan limited, or tags missing.");
         client.global.set("repositoryName", "");
         client.global.set("tag", "");
@@ -54,8 +54,8 @@ Accept: application/json
         client.global.set("repositoryName", picked.repositoryName);
         client.global.set("tag", picked.latestTag);
 
-        client.log("✅ Picked repositoryName = " + picked.repositoryName);
-        client.log("✅ Picked tag            = " + picked.latestTag);
+        client.log("Picked repositoryName = " + picked.repositoryName);
+        client.log("Picked tag            = " + picked.latestTag);
         client.log("   repositoryUri         = " + (picked.repositoryUri || ""));
         client.log("   lastPushedAt          = " + (picked.lastPushedAt || ""));
     }

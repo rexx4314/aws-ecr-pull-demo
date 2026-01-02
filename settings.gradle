@@ -1,1 +1,1 @@
-rootProject.name = 'aws-ecr-pull-demo'
+rootProject.name = 'ecr-docker-cli-pull-demo'

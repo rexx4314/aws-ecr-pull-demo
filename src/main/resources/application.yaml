@@ -3,7 +3,7 @@ server:
 
 spring:
   application:
-    name: aws-ecr-pull-demo
+    name: ecr-docker-cli-pull-demo
 
 management:
   endpoints:
@@ -12,16 +12,6 @@ management:
         include: health,info
 
 demo:
-#  docker:
-#    # docker 실행 파일(윈도우에서 PATH 못 잡는 경우 지정)
-#    executable: docker
-#    # pull이 오래 걸릴 수 있으니 별도 timeout(초)
-#    pull-timeout-seconds: 900
-#    # login timeout(초)
-#    login-timeout-seconds: 30
-#    # docker 명령 전체 동시 실행 제한
-#    max-concurrent-pulls: 1
-
   aws:
     ecr:
       # AWS SDK ECR API timeout (초)

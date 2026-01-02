@@ -1,4 +1,4 @@
-# AWS ECR Pull Demo (Spring Boot)
+# ECR Docker CLI Pull Demo (Spring Boot)
 
 ## 1. 프로젝트 개요
 
@@ -8,6 +8,8 @@
 * 로컬 Docker 이미지 조회
 * 로컬 Docker 이미지 삭제
 * 모든 동작을 REST API로 제어
+
+※ 본 프로젝트는 Docker CLI(ProcessBuilder) 기반으로 실제 docker pull을 실행하는 데모입니다.
 
 ---
 
@@ -35,6 +37,8 @@ Local Docker Engine
 * 애플리케이션 내부 저장 없음
 * 프로젝트 디렉터리 파일 생성 없음
 
+※ Docker CLI 호출은 Java ProcessBuilder를 통해 실행됩니다.
+
 ---
 
 ## 3. 실행 환경
@@ -51,9 +55,11 @@ Local Docker Engine
 
 > * Windows 11 Pro
 > * Java 21.0.9 (IntelliJ 내장 Amazon Corretto)
-> * Spring boot 3.5.3
+> * Spring Boot 3.5.3
 > * AWS SDK ECR 2.32.7
 > * Docker Desktop 29.1.3
+
+※ Docker Desktop 또는 Docker Engine 필수 (docker pull 기반 데모)
 
 ### 3.2 Docker 사전 조건
 
