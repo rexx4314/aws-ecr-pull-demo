@@ -26,7 +26,9 @@ dependencies {
     implementation("org.apache.commons:commons-lang3:3.18.0")
     implementation("commons-codec:commons-codec:1.18.0")
 
-    implementation("software.amazon.awssdk:ecr:2.32.7")
+    implementation(platform("software.amazon.awssdk:bom:2.32.7"))
+    implementation("software.amazon.awssdk:ecr")
+    implementation("software.amazon.awssdk:auth")
 
     compileOnly("org.projectlombok:lombok:1.18.38")
     annotationProcessor("org.projectlombok:lombok:1.18.38")
