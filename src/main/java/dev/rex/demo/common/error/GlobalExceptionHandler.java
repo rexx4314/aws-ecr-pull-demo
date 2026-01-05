@@ -12,10 +12,20 @@ import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+/**
+ * 전역 예외 처리기
+ * <p>
+ * 컨트롤러에서 발생한 예외를 가로채서 표준화된 ApiErrorResponse로 변환
+ */
 @Slf4j
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
+    /**
+     * ApiException 처리기
+     * <p>
+     * 로그를 남기고 에러 코드와 메시지를 포함한 bad request 응답을 반환
+     */
     @ExceptionHandler(ApiException.class)
     public ResponseEntity<ApiErrorResponse> handleApi(ApiException e, HttpServletRequest req) {
         log.warn("API error. code={}, msg={}, path={}", e.code(), e.getMessage(), req.getRequestURI());
@@ -30,6 +40,11 @@ public class GlobalExceptionHandler {
         return ResponseEntity.badRequest().body(body);
     }
 
+    /**
+     * Bean Validation 실패 처리기
+     * <p>
+     * 필드별 오류를 수집하여 details.fields에 포함한 bad request 응답을 반환
+     */
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<ApiErrorResponse> handleInvalid(MethodArgumentNotValidException e, HttpServletRequest req) {
         Map<String, Object> details = new LinkedHashMap<>();
@@ -53,6 +68,11 @@ public class GlobalExceptionHandler {
         return ResponseEntity.badRequest().body(body);
     }
 
+    /**
+     * IllegalArgumentException 처리기
+     * <p>
+     * 잘못된 요청 파라미터 등으로 발생한 예외를 bad request로 변환
+     */
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<ApiErrorResponse> handleBadRequest(IllegalArgumentException e, HttpServletRequest req) {
         ApiErrorResponse body = new ApiErrorResponse(
@@ -65,6 +85,11 @@ public class GlobalExceptionHandler {
         return ResponseEntity.badRequest().body(body);
     }
 
+    /**
+     * 그 외 모든 예외 처리기
+     * <p>
+     * 서버 내부 오류로 간주하여 internal server error 응답을 반환하고 상세 로그를 남김
+     */
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiErrorResponse> handleAny(Exception e, HttpServletRequest req) {
         log.error("Unhandled error. path={}, err={}", req.getRequestURI(), e.getMessage(), e);
