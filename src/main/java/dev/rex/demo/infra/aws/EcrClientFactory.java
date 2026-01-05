@@ -141,7 +141,7 @@ public class EcrClientFactory {
 
     /**
      * 필수 문자열 입력 검증(공백/빈 문자열 불허)
-     * - IllegalArgumentException으로 빠르게 실패하여 원인을 명확히 한다.
+     * - IllegalArgumentException으로 빠르게 실패하여 원인을 명확히 함
      */
     private String requireText(String v, String name) {
         Objects.requireNonNull(name, "name");

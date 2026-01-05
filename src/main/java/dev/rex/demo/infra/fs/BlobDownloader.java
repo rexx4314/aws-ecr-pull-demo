@@ -40,10 +40,10 @@ import java.util.Objects;
  *
  * <p>
  * 설계/정책:
- * - 다운로드는 "임시 파일(.part)"에 먼저 저장하고, 검증 성공 후 target으로 커밋(move)한다.
+ * - 다운로드는 "임시 파일(.part)"에 먼저 저장하고, 검증 성공 후 target으로 커밋(move)
  * - HTTP 401/403이 나오면 Basic Auth 헤더를 붙여 1회 재시도(토큰이 있을 때만).
  * - 재시도는 최대 retries회. (호출자가 0을 줘도 최소 1회 보장)
- * - 파일 시스템 오류는 가능한 범위에서 ErrorCode로 분류한다.
+ * - 파일 시스템 오류는 가능한 범위에서 ErrorCode로 분류
  */
 @Slf4j
 @Component
@@ -312,7 +312,7 @@ public class BlobDownloader {
     // =========================
 
     /**
-     * GetDownloadUrlForLayer를 호출하여 presigned download URL을 얻는다.
+     * GetDownloadUrlForLayer를 호출하여 presigned download URL을 얻음
      * <p>
      * 실패 시:
      * - EcrException: status/awsCode 기반 분류 후 ApiException
@@ -402,7 +402,7 @@ public class BlobDownloader {
     // =========================
 
     /**
-     * InputStream을 파일로 스트리밍 저장하면서 (옵션) SHA-256 digest를 계산한다.
+     * InputStream을 파일로 스트리밍 저장하면서 (옵션) SHA-256 digest를 계산
      * <p>
      * - digestOn=true면 SHA-256 계산 후 hex 문자열 반환
      * - digestOn=false면 파일만 저장하고 null 반환(계산 비용 절감)
@@ -449,11 +449,11 @@ public class BlobDownloader {
     // =========================
 
     /**
-     * digest(예: sha256:xxx)와 computedHex를 비교하여 무결성을 검증한다.
+     * digest(예: sha256:xxx)와 computedHex를 비교하여 무결성을 검증
      * - mismatch면 tmp 삭제 후 ApiException 발생
      */
     private void verifySha256OrThrow(String digest, String computedHex, Path tmp) {
-        // 1) ECR digest는 "sha256:{hex}" 형태이므로 prefix를 제거한 hex만 비교한다.
+        // 1) ECR digest는 "sha256:{hex}" 형태이므로 prefix를 제거한 hex만 비교
         String expectedHex = stripSha256Prefix(digest);
 
         // 2) 계산 결과가 null이면 로직 상 오류 (verifySha256=true인데 computed가 null)
@@ -507,7 +507,7 @@ public class BlobDownloader {
     /**
      * 백오프 계산 및 sleep + 로깅
      * <p>
-     * Retry.backoffMillis() 정책을 그대로 사용한다.
+     * Retry.backoffMillis() 정책을 그대로 사용
      */
     private void backoffAndSleep(int attempt, int retries, String digest, String reason) {
         long backoff = Retry.backoffMillis(attempt, backoffBaseMillis, backoffMaxMillis);
@@ -551,7 +551,7 @@ public class BlobDownloader {
 
     /**
      * FileSystemException 메시지 기반으로 ErrorCode 분류
-     * - OS/FS마다 메시지 포맷이 달라 “보수적으로” 판단한다.
+     * - OS/FS마다 메시지 포맷이 달라 “보수적으로” 판단
      */
     private ErrorCode classifyFileSystemException(FileSystemException fse) {
         String reason = safeFsMsg(fse);
@@ -608,7 +608,7 @@ public class BlobDownloader {
 
     /**
      * blank 방어 + ApiException(요청 오류) 변환
-     * - downloader는 infra 계층이지만, 현재 프로젝트 정책상 ApiException으로 통일한다.
+     * - downloader는 infra 계층이지만, 현재 프로젝트 정책상 ApiException으로 통일
      */
     private String requireText(String v, String name) {
         String t = StringUtils.trimToNull(v);
@@ -697,7 +697,7 @@ public class BlobDownloader {
 
     /**
      * HTTP status 기반 "재시도 가능" 신호용 내부 예외
-     * - 상위 루프에서 동일한 재시도 정책으로 처리한다.
+     * - 상위 루프에서 동일한 재시도 정책으로 처리
      */
     private static class RetryableHttpException extends RuntimeException {
         final int status;

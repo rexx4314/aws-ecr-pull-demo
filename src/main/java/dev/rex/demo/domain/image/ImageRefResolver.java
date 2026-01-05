@@ -141,7 +141,7 @@ public class ImageRefResolver {
     /**
      * resolveLatest 구현:
      * TAGGED 이미지들을 describeImages로 페이지네이션 스캔하며,
-     * pushedAt이 가장 최신인 ImageDetail의 tag를 선택한다.
+     * pushedAt이 가장 최신인 ImageDetail의 tag를 선택
      *
      * <p>
      * budget:

@@ -196,7 +196,7 @@ public class EcrController {
     }
 
     /**
-     * scan 결과를 캐시에 넣는다.
+     * scan 결과를 캐시에 넣음
      *
      * <p>
      * 키: region|accountId|repo
@@ -220,7 +220,7 @@ public class EcrController {
     }
 
     /**
-     * 다운로드 요청에서 repo 상태를 얻는다.
+     * 다운로드 요청에서 repo 상태를 가져옴
      *
      * <p>
      * 동작:
@@ -261,7 +261,7 @@ public class EcrController {
     }
 
     /**
-     * repo pullable 여부를 검증한다.
+     * repo pullable 여부를 검증
      * - pullable=false면 ApiException으로 즉시 실패(다운로드 실행 전 차단)
      */
     private void ensureRepoPullable(EcrDownloadRequest req, EcrRepoItem repoStatus) {
@@ -320,7 +320,7 @@ public class EcrController {
     }
 
     /**
-     * 요청에서 로그용 tag/digest를 결정한다.
+     * 요청에서 로그용 tag/digest를 결정
      * - tag가 있으면 tag
      * - 없으면 digest
      *
@@ -361,7 +361,7 @@ public class EcrController {
      * <p>
      * 설계 의도:
      * - reason은 스캔 서비스에서 문자열로 결정되므로
-     * - controller에서 ErrorCode로 변환해 일관된 에러 응답을 만든다.
+     * - controller에서 ErrorCode로 변환해 일관된 에러 응답을 만듦
      *
      * <p>
      * 주의:

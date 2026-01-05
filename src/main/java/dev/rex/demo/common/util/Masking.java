@@ -42,11 +42,11 @@ public final class Masking {
      * - 그 외에는 앞 12자만 남기고 "..."을 붙여 반환
      *
      * @param digest 원본 다이제스트 문자열
-     * @return 마스킹/단축된 다이제스트 또는 null
+     * @return 마스킹/단축된 다이제스트 또는 공백 문자열 (null 또는 빈 문자열 입력 시)
      */
     public static String maskDigest(String digest) {
         String s = StringUtils.trimToNull(digest);
-        if (s == null) return null;
+        if (s == null) return "";
         // sha256:abcd.... -> 앞 12자만
         if (s.length() <= 20) return s;
         return s.substring(0, 12) + "...";

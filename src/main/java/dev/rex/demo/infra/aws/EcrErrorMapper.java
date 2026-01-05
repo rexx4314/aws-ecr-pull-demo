@@ -33,7 +33,7 @@ public final class EcrErrorMapper {
      * - 429 or Throttling* -> DOWNLOAD_ECR_THROTTLED
      *
      * <p>
-     * 그 외는 호출 측 맥락에 따라 다를 수 있으므로 기본값을 DOWNLOAD_ECR_API_FAILED로 둔다.
+     * 그 외는 호출 측 맥락에 따라 다를 수 있으므로 기본값을 DOWNLOAD_ECR_API_FAILED로 둠
      */
     public static ErrorCode toErrorCode(EcrException e) {
         if (e == null) return ErrorCode.DOWNLOAD_ECR_API_FAILED;

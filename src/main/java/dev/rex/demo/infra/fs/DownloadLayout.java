@@ -103,7 +103,7 @@ public class DownloadLayout {
         String d = StringUtils.trimToNull(digest);
         if (d == null) throw new IllegalArgumentException("digest is blank");
 
-        // ECR은 보통 sha256: 접두어를 포함해서 내려준다.
+        // ECR은 보통 sha256: 접두어를 포함해서 내려줌
         if (d.startsWith(DIGEST_PREFIX)) {
             return d.substring(DIGEST_PREFIX.length());
         }
