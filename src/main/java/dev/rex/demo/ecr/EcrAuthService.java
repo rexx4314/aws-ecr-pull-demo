@@ -18,8 +18,8 @@ import java.nio.charset.StandardCharsets;
  * - AWS ECR GetAuthorizationToken API 호출
  * - docker login 에 필요한 인증 정보 추출
  * <p>
- * - AWS ECR은 IAM accessKey/secretKey로 직접 docker login을 하지 않는다.
- * - 반드시 ECR API를 통해 "임시 Authorization Token"을 발급받아야 한다.
+ * - AWS ECR은 IAM accessKey/secretKey로 직접 docker login을 하지 않음
+ * - 반드시 ECR API를 통해 "임시 Authorization Token"을 발급받아야 함
  * <p>
  * 결과
  * - registry      : docker login 대상 레지스트리 주소
@@ -69,7 +69,6 @@ public class EcrAuthService {
     ) {
         // try-with-resources: EcrClient는 close 필요
         try (EcrClient ecr = ecrClientFactory.create(region, accessKeyId, secretAccessKey)) {
-
             // registryId(accountId) 기준으로 ECR 인증 토큰 요청
             GetAuthorizationTokenRequest req = GetAuthorizationTokenRequest.builder()
                     .registryIds(accountId)
@@ -110,6 +109,7 @@ public class EcrAuthService {
             String decoded = new String(Base64.decodeBase64(tokenB64), StandardCharsets.UTF_8);
 
             int idx = decoded.indexOf(':');
+
             if (idx <= 0 || idx == decoded.length() - 1) {
                 throw new IllegalStateException("authorizationToken decode 형식이 예상과 다릅니다.");
             }

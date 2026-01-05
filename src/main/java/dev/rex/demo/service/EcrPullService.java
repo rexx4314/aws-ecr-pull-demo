@@ -62,6 +62,7 @@ public class EcrPullService {
         if (StringUtils.isBlank(s)) return s;
 
         String t = s.trim();
+
         if (t.length() <= 6) return "******";
 
         return t.substring(0, 4)
@@ -85,7 +86,6 @@ public class EcrPullService {
      * - pull 결과 이미지는 "서버 머신의 Docker 저장소"에 저장됨
      */
     public EcrPullResponse pull(EcrPullRequest req) {
-
         // - secretAccessKey는 절대 로그에 남기지 않음
         // - accessKeyId는 식별 가능하도록 부분 마스킹
         log.info(
@@ -97,8 +97,7 @@ public class EcrPullService {
                 StringUtils.defaultIfBlank(req.tag(), TAG_LATEST)
         );
 
-        // tag 정규화
-        // - null / blank / 공백만 있는 경우 latest로 처리
+        // tag 정규화: null / blank / 공백만 있는 경우 latest로 처리
         String tag = StringUtils.defaultIfBlank(
                 StringUtils.trimToNull(req.tag()),
                 TAG_LATEST
@@ -116,9 +115,9 @@ public class EcrPullService {
                 req.secretAccessKey()
         );
 
-        //  2) docker login
-        //  - password-stdin 방식 사용
-        //  - 커맨드라인 인자에 비밀번호 노출 방지
+        // 2) docker login
+        // - password-stdin 방식 사용
+        // - 커맨드라인 인자에 비밀번호 노출 방지
         dockerCliService.loginWithPasswordStdin(
                 token.registry(),
                 token.username(),
@@ -141,7 +140,6 @@ public class EcrPullService {
 
         // 5) docker inspect로 digest 확인 (선택)
         // - 실패해도 pull 자체는 성공으로 간주
-        // - 결과 신뢰성/추적성 보강 목적
         String digest = dockerCliService.inspectDigest(imageRef);
 
         // API 응답 구성

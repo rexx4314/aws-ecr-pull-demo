@@ -17,7 +17,6 @@ import org.springframework.web.bind.annotation.*;
  * <p>
  * - Docker CLI 호출 책임은 DockerCliService에 위임
  * - Controller는 HTTP 요청/응답 매핑만 담당
- * - 실제 docker 명령어는 이 레이어에 노출되지 않음
  * <p>
  * 주의
  * - 이 API는 "로컬 Docker 엔진"을 직접 조작

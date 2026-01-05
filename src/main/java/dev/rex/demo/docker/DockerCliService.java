@@ -13,6 +13,28 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * Docker CLI 연동 서비스
+ * <p>
+ * 주요 기능
+ * - Docker 데몬 헬스체크 (docker version)
+ * - ECR 로그인 (docker login --password-stdin)
+ * - 이미지 pull (docker pull)
+ * - 이미지 digest 조회 (docker inspect)
+ * - 로컬 이미지 목록 조회 (docker images)
+ * - 로컬 이미지 삭제 (docker rmi)
+ * <p>
+ * 설계 특징
+ * - 외부 라이브러리 의존 없이 JDK ProcessBuilder만 사용
+ * - stdout/stderr 동시 수집으로 데드락 방지
+ * - timeout 기반 프로세스 제어로 무한 대기 방지
+ * - password-stdin 방식으로 민감 정보 보호
+ * <p>
+ * 주의사항
+ * - Docker 데몬이 실행 중이어야 함
+ * - 모든 명령은 DOCKER_CMD_TIMEOUT 내 완료되어야 함
+ * - 비동기/큐잉 없이 동기 실행되므로 요청 스레드 점유
+ */
 @Slf4j
 @Service
 public class DockerCliService {
@@ -63,11 +85,12 @@ public class DockerCliService {
      * <p>
      * 주의
      * - registry/username은 필수
-     * - password는 stdin으로 전달됨(마스킹 로깅 권장: 상위 서비스에서 처리)
+     * - password는 stdin으로 전달됨
      */
     public void loginWithPasswordStdin(String registry, String username, String password) {
         String reg = StringUtils.trimToNull(registry);
         String user = StringUtils.trimToNull(username);
+
         if (reg == null || user == null) {
             throw new IllegalArgumentException("registry/username은 필수입니다.");
         }
@@ -99,6 +122,7 @@ public class DockerCliService {
      */
     public void pullImage(String imageRef) {
         String ref = StringUtils.trimToNull(imageRef);
+
         if (ref == null) throw new IllegalArgumentException("imageRef는 필수입니다.");
 
         try {
@@ -122,10 +146,11 @@ public class DockerCliService {
      * - 예: ["repo@sha256:..."]
      * <p>
      * 주의
-     * - digest 조회 실패는 치명적이지 않으므로 null 반환(선택 기능)
+     * - digest 조회 실패는 치명적이지 않으므로 null 반환
      */
     public String inspectDigest(String imageRef) {
         String ref = StringUtils.trimToNull(imageRef);
+
         if (ref == null) return null;
 
         try {
@@ -134,17 +159,20 @@ public class DockerCliService {
                     null,
                     DOCKER_CMD_TIMEOUT
             );
+
             if (r.exitCode() != 0) {
                 log.warn("docker inspect digest 실패. imageRef={}, msg={}", ref, safeMsg(r));
                 return null;
             }
 
             String out = StringUtils.trimToNull(r.stdout());
+
             if (out == null || "null".equals(out) || "[]".equals(out)) return null;
 
             // ["repo@sha256:..."] 형태에서 첫 문자열만 추출
             int q1 = out.indexOf('"');
             int q2 = (q1 >= 0) ? out.indexOf('"', q1 + 1) : -1;
+
             if (q1 >= 0 && q2 > q1) return out.substring(q1 + 1, q2);
             return null;
 
@@ -183,13 +211,17 @@ public class DockerCliService {
 
             // stdout 라인 파싱
             List<DockerImageItem> items = new ArrayList<>();
+
             try (BufferedReader br = new BufferedReader(new StringReader(r.stdout()))) {
                 String line;
+
                 while ((line = br.readLine()) != null) {
                     line = line.trim();
+
                     if (line.isEmpty()) continue;
 
                     String[] parts = line.split("\\|", -1);
+
                     if (parts.length < 6) continue;
 
                     String repo = nullToNull(parts[0]);
@@ -225,16 +257,20 @@ public class DockerCliService {
      */
     public void removeImage(String imageRef, boolean force) {
         String ref = StringUtils.trimToNull(imageRef);
+
         if (ref == null) throw new IllegalArgumentException("imageRef는 필수입니다.");
 
         List<String> cmd = new ArrayList<>();
         cmd.add("docker");
         cmd.add("rmi");
+
         if (force) cmd.add("-f");
+
         cmd.add(ref);
 
         try {
             ExecResult r = exec(cmd, null, DOCKER_CMD_TIMEOUT);
+
             if (r.exitCode() != 0) {
                 throw new IllegalStateException("docker rmi 실패: " + safeMsg(r));
             }
@@ -249,7 +285,7 @@ public class DockerCliService {
      * ProcessBuilder 특징
      * - 외부 라이브러리 의존 없이 JDK 기본 기능만으로 구현 가능
      * - 운영 환경(리눅스/윈도우)에서도 동일하게 동작
-     * - CLI 동작을 그대로 재현(운영 환경과 동일한 관점)
+     * - CLI 동작을 그대로 재현
      * <p>
      * - stdout/stderr를 "동시에" 읽지 않으면 버퍼가 차서 deadlock 가능
      * -> StreamCollector를 각각 스레드로 실행
@@ -260,6 +296,8 @@ public class DockerCliService {
      * @param command docker 명령 + 인자 리스트
      * @param stdin   null 아니면 stdin으로 입력(예: password-stdin)
      * @param timeout 실행 제한 시간
+     * @return 실행 결과 (exitCode, stdout, stderr)
+     * @throws IOException 실행 실패 또는 timeout 초과 시
      */
     private ExecResult exec(List<String> command, String stdin, Duration timeout) throws IOException {
         ProcessBuilder pb = new ProcessBuilder(command);
@@ -272,6 +310,7 @@ public class DockerCliService {
             // docker login --password-stdin 에서는 stdin에 password가 반드시 들어가야 함
             try (OutputStream os = p.getOutputStream()) {
                 os.write(stdin.getBytes(StandardCharsets.UTF_8));
+
                 // docker는 보통 개행 포함 입력을 기대하므로 끝에 '\n' 보정
                 if (!stdin.endsWith("\n")) os.write('\n');
                 os.flush();
@@ -291,6 +330,7 @@ public class DockerCliService {
 
         // timeout 내 종료 대기
         boolean finished;
+
         try {
             finished = p.waitFor(timeout.toMillis(), TimeUnit.MILLISECONDS);
         } catch (InterruptedException ie) {
@@ -329,6 +369,8 @@ public class DockerCliService {
      * - 정상 destroy 시도 후, 일정 시간 내 종료 안되면 destroyForcibly
      * <p>
      * - timeout/interrupt 발생 시 좀비 프로세스 방지
+     *
+     * @param p 종료할 프로세스
      */
     private void destroyProcess(Process p) {
         try {
@@ -344,9 +386,13 @@ public class DockerCliService {
     /**
      * 에러 메시지 추출
      * - stderr 우선, 없으면 stdout
+     *
+     * @param r 실행 결과
+     * @return 에러 메시지 (없으면 "(no output)")
      */
     private String safeMsg(ExecResult r) {
         String s = StringUtils.trimToNull(r.stderr());
+
         if (s == null) s = StringUtils.trimToNull(r.stdout());
         return (s == null) ? "(no output)" : s;
     }
@@ -354,9 +400,13 @@ public class DockerCliService {
     /**
      * docker 출력 파싱용 유틸
      * - null/blank/<none> 은 null 처리
+     *
+     * @param s 파싱할 문자열
+     * @return 정규화된 문자열 (null 또는 유효값)
      */
     private String nullToNull(String s) {
         String t = StringUtils.trimToNull(s);
+
         if (t == null) return null;
         if ("<none>".equalsIgnoreCase(t)) return null;
         return t;
@@ -372,7 +422,7 @@ public class DockerCliService {
     }
 
     /**
-     * stdout/stderr를 별도 스레드에서 끝까지 읽어 buffer에 저장하는 수집기
+     * stdout/stderr를 별도 스레드에서 끝까지 읽어 buffer에 저장하는 Collector
      * <p>
      * - 프로세스가 stdout/stderr에 많이 쓰면 OS 버퍼가 찰 수 있음
      * - 버퍼가 차면 프로세스가 write에서 block되고, waitFor도 끝나지 않는 deadlock이 발생 가능
@@ -383,10 +433,19 @@ public class DockerCliService {
         private final InputStream is;
         private final ByteArrayOutputStream buffer = new ByteArrayOutputStream();
 
+        /**
+         * StreamCollector 생성자
+         *
+         * @param is 수집할 InputStream (stdout 또는 stderr)
+         */
         private StreamCollector(InputStream is) {
             this.is = is;
         }
 
+        /**
+         * 스트림 끝까지 읽어 내부 buffer에 저장
+         * - IOException 무시 (프로세스 종료 시 흔히 발생)
+         */
         @Override
         public void run() {
             try (InputStream in = is) {
@@ -400,6 +459,11 @@ public class DockerCliService {
             }
         }
 
+        /**
+         * 수집된 내용을 UTF-8 문자열로 반환
+         *
+         * @return 수집된 텍스트
+         */
         String text() {
             return buffer.toString(StandardCharsets.UTF_8);
         }

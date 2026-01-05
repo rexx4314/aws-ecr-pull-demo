@@ -17,6 +17,24 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
+/**
+ * ECR Repository 스캔 서비스
+ * <p>
+ * 주요 기능
+ * - AWS ECR 전체 Repository 목록 조회
+ * - 각 Repository의 최신 태그(latest tag) 자동 계산
+ * - Pull 가능 여부 사전 판단 (빈 레포/불확실한 레포는 pullable=false 처리)
+ * <p>
+ * 설계 특징
+ * - 메모리 효율: 최신 이미지 후보 1개만 유지 (O(1) 메모리)
+ * - 서비스 보호: 타임아웃/페이지 상한/반복 상한으로 과도한 스캔 방지
+ * - 안정성: 빈 레포/태그 불확실 시 pullable=false로 사전 차단하여 pull 실패 방지
+ * <p>
+ * 태그 선택 규칙
+ * - latest 태그 우선
+ * - 없으면 첫 번째 태그
+ * - 태그가 없으면 pullable=false
+ */
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -27,16 +45,16 @@ public class EcrRepoScanService {
      * - 최신 이미지 후보에 latest 태그가 있으면 우선 선택
      * - 없으면 첫 번째 태그 선택
      * <p>
-     * 주의: 이 값 자체가 "항상 존재하는 태그"를 의미하지는 않음.
+     * 주의: 이 값 자체가 "항상 존재하는 태그"를 의미하지는 않음
      * (빈 레포 or 태그 없는 이미지의 경우 latest를 강제로 쓰면 pull 실패하므로, 이 서비스는 pullable=false로 차단함)
      */
     private static final String TAG_LATEST = "latest";
 
     /**
-     * 페이지네이션/스캔 방어값(서비스 다운 방지 목적)
+     * 페이지네이션/스캔 방어값(서비스 다운 방지)
      * - ECR API는 nextToken 기반 페이지네이션이며,
-     * 비정상 상황에서 token 반복/과도한 페이지 수로 무한 루프처럼 보일 수 있음.
-     * - "과도한 스캔"을 방지하기 위해 상한을 둠.
+     * 비정상 상황에서 token 반복/과도한 페이지 수로 무한 루프처럼 보일 수 있음
+     * - "과도한 스캔"을 방지하기 위해 상한을 둠
      */
     private static final int MAX_PAGINATION_ITERATIONS = 10_000;
     private static final int MAX_PAGES_PER_REPO = 2_000;
@@ -58,16 +76,20 @@ public class EcrRepoScanService {
     private final AwsEcrClientFactory ecrClientFactory;
 
     /**
-     * (요구사항 #1) 모든 repo를 가져오고, 각 repo의 최신 tag를 계산하여 반환
+     * 모든 ECR Repository 스캔 및 최신 태그 계산
      * <p>
      * 입력
      * - region, accountId, accessKeyId, secretAccessKey
      * <p>
      * 출력
-     * - repo 목록 + repo별 최신 tag(latestTag) + pullable 여부 + 실패 사유(reason)
+     * - Repository 목록 + 각 Repository별 최신 태그 + Pull 가능 여부
      * <p>
-     * - "빈 레포(이미지 없음)" 또는 "태그/시간 판단 불가"인 레포를 사전에 pullable=false로 표시하여 docker pull 실패를 방지
-     * - 최신 태그 판단은 DescribeImages(TAGGED) 페이지를 끝까지 스캔하되, 전체 리스트를 적재하지 않고 최신 후보 1개만 유지(O(1) 메모리)
+     * 특징
+     * - 빈 레포 또는 태그 판단 불가 시 pullable=false 처리
+     * - 최신 태그 판단 시 전체 리스트 적재하지 않고 최신 후보 1개만 유지
+     *
+     * @param req AWS 자격증명 및 리전 정보
+     * @return Repository 스캔 결과 (개수 + 상세 목록)
      */
     public EcrRepoScanResponse scanAllReposWithLatestTag(EcrRepoScanRequest req) {
         // try-with-resources: EcrClient는 close 필요
@@ -99,14 +121,15 @@ public class EcrRepoScanService {
     }
 
     /**
-     * accountId(registryId) 기준으로 모든 Repository를 페이지 끝까지 수집
+     * 모든 Repository 목록 조회 (페이지네이션 끝까지)
      * <p>
      * 방어 로직
-     * - 반복 상한(MAX_PAGINATION_ITERATIONS)
-     * - nextToken 반복 반환 감지 (token이 이전과 동일하면 break)
-     * <p>
-     * 주의
-     * - Repository가 많을 수 있으므로, 이 단계는 "리스트 전체 적재"가 발생함.
+     * - 반복 상한 (MAX_PAGINATION_ITERATIONS)
+     * - nextToken 반복 감지
+     *
+     * @param ecr       ECR 클라이언트
+     * @param accountId AWS 계정 ID
+     * @return Repository 목록
      */
     private List<Repository> listAllRepositories(EcrClient ecr, String accountId) {
         List<Repository> repos = new ArrayList<>();
@@ -145,18 +168,18 @@ public class EcrRepoScanService {
     }
 
     /**
-     * "실제 pull 가능한 최신 태그" 계산
-     * <p>
-     * - 이 서비스는 '최신 후보가 없다/불확실'하면 절대 pull을 시도하지 않도록 pullable=false로 반환
-     * 이유: 임의로 latest를 보정해서 pull을 시도하면, 빈 레포에서 "not found" 오류 발생
+     * Repository의 Pull 가능한 최신 태그 계산
      * <p>
      * 상태별 처리
-     * - NO_TAGGED_IMAGES(=이미지 없음): latestTag=null, pullable=false, reason=NO_IMAGES_IN_REPOSITORY
-     * - TAGGED_BUT_NO_PUSHED_AT: latestTag=null, pullable=false (최신 판단 불가)
-     * - TIMED_OUT_OR_LIMITED: latestTag=null, pullable=false (제한 초과, pull 금지)
-     * - OK:
-     * - 최신 pushed 이미지의 tags에서 latest 우선, 없으면 첫 번째
-     * - tags가 비정상이면 pull 가능한 tag를 특정할 수 없으므로 pullable=false 처리
+     * - NO_TAGGED_IMAGES: pullable=false (이미지 없음)
+     * - TAGGED_BUT_NO_PUSHED_AT: pullable=false (최신 판단 불가)
+     * - TIMED_OUT_OR_LIMITED: pullable=false (제한 초과)
+     * - OK: 최신 이미지의 태그에서 latest 우선 선택
+     *
+     * @param ecr            ECR 클라이언트
+     * @param accountId      AWS 계정 ID
+     * @param repositoryName Repository 이름
+     * @return 최신 태그 계산 결과 (태그, 시간, Pull 가능 여부)
      */
     private RepoLatestTagResult computeLatestTagForRepo(EcrClient ecr, String accountId, String repositoryName) {
         // Repo 내 TAGGED 이미지들 중 최신 후보 1개(bestPushedAt/bestTags)만 뽑아옴
@@ -195,6 +218,7 @@ public class EcrRepoScanService {
             case OK -> {
                 // 최신 후보 이미지의 tags에서 pull에 사용할 tag를 결정
                 String tag = pickTagForRepoAddr(scan.bestTags());
+
                 if (StringUtils.isBlank(tag)) {
                     // tags 자체가 없거나 비정상인 경우: pull 가능한 태그를 특정할 수 없음
                     yield new RepoLatestTagResult(
@@ -215,22 +239,21 @@ public class EcrRepoScanService {
     }
 
     /**
-     * TAGGED 이미지를 스캔하여 "최신 pushed 이미지" 후보 1개만 유지 (메모리 O(1))
+     * TAGGED 이미지 스캔 (메모리 O(1))
      * <p>
-     * 이유
-     * - ECR의 describeImages는 페이지 단위로 결과를 반환하며,
-     * 레포가 매우 큰 경우 전체 적재(List 누적)는 메모리/성능/서비스 안정성 부담 증가
-     * - 그래서 "최신 후보 1개"만 유지하면서 페이지를 끝까지 읽도록 설계
+     * 특징
+     * - 최신 후보 1개만 유지하며 페이지를 끝까지 읽음
+     * - 전체 리스트를 적재하지 않아 메모리 효율적
      * <p>
      * 방어 정책
      * - REPO_SCAN_BUDGET 초과 시 중단
      * - MAX_PAGINATION_ITERATIONS / MAX_PAGES_PER_REPO 상한
      * - nextToken 반복 감지
-     * <p>
-     * 결과 상태 구분
-     * - NO_TAGGED_IMAGES: TAGGED 결과 자체가 한 번도 안 내려옴(=이미지 없음)
-     * - TAGGED_BUT_NO_PUSHED_AT: TAGGED는 있었으나 pushedAt을 끝까지 못 얻음(전부 null 등)
-     * - OK: pushedAt 최대값 후보를 얻음
+     *
+     * @param ecr            ECR 클라이언트
+     * @param accountId      AWS 계정 ID
+     * @param repositoryName Repository 이름
+     * @return 스캔 결과 (상태, 최신 시간, 태그 목록)
      */
     private LatestScanResult scanLatestTaggedImage(EcrClient ecr, String accountId, String repositoryName) {
         Instant startedAt = Instant.now();
@@ -274,6 +297,7 @@ public class EcrRepoScanService {
             );
 
             List<ImageDetail> details = resp.imageDetails();
+
             if (details != null && !details.isEmpty()) {
                 // TAGGED 결과가 내려왔으므로 "TAGGED 존재"로 기록
                 sawTagged = true;
@@ -310,13 +334,15 @@ public class EcrRepoScanService {
     }
 
     /**
-     * pull에 사용할 태그 선택 규칙
-     * - latest 태그가 있으면 latest 우선
-     * - 없으면 첫 번째 태그
+     * Pull에 사용할 태그 선택
      * <p>
-     * 주의
-     * - tags가 비어있으면 null 반환
-     * - 상위 로직에서 null/blank면 pullable=false 처리(=pull 시도 금지)
+     * 규칙
+     * - latest 태그 우선
+     * - 없으면 첫 번째 태그
+     * - tags가 비어있으면 null 반환 (상위에서 pullable=false 처리)
+     *
+     * @param tags 태그 목록
+     * @return 선택된 태그 (없으면 null)
      */
     private String pickTagForRepoAddr(List<String> tags) {
         if (tags == null || tags.isEmpty()) return null;
@@ -326,8 +352,12 @@ public class EcrRepoScanService {
 
     /**
      * nextToken 정규화
+     * <p>
      * - null/blank는 null로 통일
      * - token 비교 정확도를 위해 trim 처리
+     *
+     * @param token 토큰 문자열
+     * @return 정규화된 토큰 (null 또는 trimmed)
      */
     private String normalizeToken(String token) {
         return StringUtils.trimToNull(token);
@@ -335,6 +365,11 @@ public class EcrRepoScanService {
 
     /**
      * TAGGED 이미지 스캔 결과 상태
+     * <p>
+     * - OK: 정상적으로 최신 이미지 판단 완료
+     * - NO_TAGGED_IMAGES: TAGGED 이미지가 없음 (빈 레포)
+     * - TAGGED_BUT_NO_PUSHED_AT: TAGGED는 있으나 pushedAt 판단 불가
+     * - TIMED_OUT_OR_LIMITED: 시간/페이지/반복 제한 초과
      */
     private enum ScanStatus {
         OK,
@@ -344,15 +379,15 @@ public class EcrRepoScanService {
     }
 
     /**
-     * scanLatestTaggedImage() 반환값
+     * 최신 이미지 스캔 결과 DTO
      * <p>
-     * - status: OK/NO_TAGGED_IMAGES/TAGGED_BUT_NO_PUSHED_AT/TIMED_OUT_OR_LIMITED
-     * - bestPushedAt: 최신 pushedAt (없으면 null)
-     * - bestTags: 최신 후보의 tags (없으면 empty)
-     * <p>
-     * 방어
-     * - status는 null 불가
-     * - bestTags는 불변 리스트로 copy
+     * - status: 스캔 상태
+     * - bestPushedAt: 최신 이미지 Push 시간 (없으면 null)
+     * - bestTags: 최신 이미지의 태그 목록 (없으면 empty)
+     *
+     * @param status       스캔 상태 (null 불가)
+     * @param bestPushedAt 최신 Push 시간
+     * @param bestTags     최신 이미지 태그 목록 (불변)
      */
     private record LatestScanResult(ScanStatus status, Instant bestPushedAt, List<String> bestTags) {
         LatestScanResult {
@@ -362,12 +397,17 @@ public class EcrRepoScanService {
     }
 
     /**
-     * Repo별 최신 태그 계산 결과
+     * Repository별 최신 태그 계산 결과 DTO
      * <p>
-     * - latestTag: pull에 사용할 태그(없으면 null)
-     * - lastPushedAt: 최신 이미지 pushedAt(없으면 null)
-     * - pullable: true면 pull 가능 / false면 pull 금지
-     * - reason: pullable=false인 사유 코드(클라이언트에서 pull 시도 차단/로그 분석용)
+     * - latestTag: Pull에 사용할 태그 (없으면 null)
+     * - lastPushedAt: 최신 이미지 Push 시간 (없으면 null)
+     * - pullable: Pull 가능 여부 (true=가능, false=금지)
+     * - reason: pullable=false인 경우 사유 코드
+     *
+     * @param latestTag    최신 태그
+     * @param lastPushedAt 최신 Push 시간
+     * @param pullable     Pull 가능 여부
+     * @param reason       Pull 불가 사유
      */
     private record RepoLatestTagResult(
             String latestTag,
