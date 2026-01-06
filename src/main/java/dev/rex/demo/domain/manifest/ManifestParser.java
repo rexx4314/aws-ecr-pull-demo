@@ -56,7 +56,7 @@ public final class ManifestParser {
      */
     public static ParsedManifest parse(String manifestJson) {
         // 1) 입력값 정규화
-        //    - 공백/빈 문자열은 허용하지 않음
+        // - 공백/빈 문자열은 허용하지 않음
         String normalized = StringUtils.trimToNull(manifestJson);
         if (normalized == null) {
             throw new IllegalArgumentException("manifestJson is blank");
@@ -74,8 +74,8 @@ public final class ManifestParser {
             }
 
             // 4) 단일 manifest 처리
-            //    - layers[].digest 추출
-            //    - config.digest 추출
+            // - layers[].digest 추출
+            // - config.digest 추출
             List<String> layerDigests = extractLayerDigests(root);
             String configDigest = extractConfigDigest(root);
 
@@ -87,7 +87,7 @@ public final class ManifestParser {
             }
 
             // 6) 정상 파싱 결과 반환
-            //    - List.copyOf: 외부 변경 방지
+            // - List.copyOf: 외부 변경 방지
             return new ParsedManifest(false, List.copyOf(layerDigests), configDigest);
 
         } catch (RuntimeException re) {

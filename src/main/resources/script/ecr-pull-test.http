@@ -1,30 +1,86 @@
 ###
 # =====================================================================
-# ECR Layer Stream Downloader - IntelliJ HTTP Client (FINAL)
-# - 기능:
-#   1) ECR repo 전체 + 최신 tag 조회 (안전 정렬 적용)
-#   2) ECR 레이어 다운로드(스트리밍) + manifest/blobs 저장 + sha256 검증
-#   3) docker save tar(export) 생성 후 다운로드 (docker load 가능)
-# - 반영:
-#   A) scanOk=false면 repo/tag 비우기
-#   B) export에도 outputDir/includeConfig/verifySha256 명시
-#   C) fileNameHint 안전화(/ 제거)
-#   D) export 응답 저장 스크립트 제거 + X-Server-Tar-Path 헤더 출력
+# ECR Layer Stream Downloader - IntelliJ HTTP Client
+#
+# API 설명
+#  1) /api/ecr/scan
+#     - ECR 전체 repo를 스캔하고, 각 repo별 최신 tag/푸시시각/풀 가능(pullable) 여부를 반환
+#     - 응답에서 "가장 최신(lastPushedAt)" repo+tag를 안전 정렬로 1개 선택하여 전역 변수로 저장
+#
+#  2) /api/ecr/download  (정책/검증 포함 다운로드)
+#     - (서버) scan-cache 또는 단건 스캔으로 repo 상태를 확인한 뒤,
+#       pullable 검증 + latest tag 정책(TAG_NOT_LATEST) 적용 후 다운로드 수행
+#     - 레이어(블롭) 스트리밍 다운로드 + manifest/blobs 저장 + sha256 검증(옵션)
+#
+#  3) /api/ecr/export/docker-save  (로컬 산출물 기반 tar export)
+#     - (서버) 로컬 산출물(manifest/blobs/config)을 기반으로 docker-save tar 생성
+#     - 응답은 application/x-tar (docker load 가능한 tar)
+#     - X-Server-Tar-Path 헤더로 "서버 내부 tar 경로" 제공(디버깅/운영 확인용)
+#
+#  4) /api/ecr/download/direct  (정책/검증 없이 즉시 다운로드)
+#     - /scan, 캐시, pullable 검증, latest tag 정책 검증을 생략하고 곧바로 다운로드 수행
+#     - repo/tag 미존재/권한 부족 등은 다운로드 과정에서 실패 가능
+#
+#  5) /api/ecr/download/direct/docker-save  (단일 호출: 즉시 다운로드 + tar까지)
+#     - (서버) 정책/검증 없이 즉시 다운로드 수행 후,
+#       곧바로 docker-save tar 생성까지 "한 번의 호출"로 처리
+#     - tar 응답은 IntelliJ "Save Response"로 저장 권장
+#
+# 테스트 흐름
+#  - 일반 안전 흐름:
+#      1) scan -> 2) download -> 3) export
+#  - 빠른/직접 확인:
+#      4) download/direct
+#  - 단일 호출로 tar까지:
+#      5) download/direct/docker-save
+#
+# 전역 변수 정책
+#  - scanOk=false면 repositoryName/tag를 비워 후속 요청에서 실수로 호출되는 것을 방지
+#  - 단, /download/direct 및 /download/direct/docker-save는 scanOk와 무관하게 실행 가능
+#
+# 반영
+#  A) scanOk=false면 repo/tag 비우기
+#  B) export 요청에 outputDir/includeConfig/verifySha256 명시
+#  C) fileNameHint 안전화(/ 제거) - 호출부에서도 / 미사용 권장
+#  D) export 응답 저장 스크립트 제거 + X-Server-Tar-Path 헤더 출력
+#  E) /download/direct 엔드포인트 추가(스캔/정책검증 없이 즉시 다운로드)
+#  F) /download/direct/docker-save 엔드포인트 추가(단일 호출로 tar까지)
+#
+# 주의(보안/운영)
+#  - accessKeyId/secretAccessKey는 민감정보. 공유/커밋/로그 출력 금지 권장
+#  - 운영에서는 레이트리밋/권한/감사로그 등 보호 장치가 필요할 수 있음
 # =====================================================================
 
 ###
 # ---------------------------------------------------------------------
 # 0) 전역 변수 예시
 # ---------------------------------------------------------------------
-# @host = http://localhost:8080
+#
+# @host = http://localhost:18080
 # @region = ap-northeast-2
 # @accountId = 123456789012
 # @accessKeyId = AKIA....
 # @secretAccessKey = ....
+#
+# 선택(임시자격증명/STS 사용 시)
+# @sessionToken = ....
+#
+# 선택(직접 지정 테스트 시 scan 없이도 사용 가능)
+# @repositoryName = my-repo
+# @tag = v1
+# @digest = sha256:....
+# ---------------------------------------------------------------------
 
 ###
 # ---------------------------------------------------------------------
 # 1) Repo 스캔
+#  - /api/ecr/scan
+#  - 응답(items)에서 pullable=true && latestTag 존재 항목만 후보로 구성
+#  - lastPushedAt을 Date.parse로 ms 변환하여 "최신 우선" 정렬
+#    * lastPushedAt이 null/파싱불가이면 뒤로 밀림
+#  - 동률이면 repoName 오름차순으로 결정(결과 안정화)
+#  - 선택 결과를 client.global에 저장:
+#     repositoryName, tag, scanOk
 # ---------------------------------------------------------------------
 # @name scanReposWithLatestTag
 POST {{host}}/api/ecr/scan
@@ -57,6 +113,7 @@ Accept: application/json
         client.global.set("scanOk", "false");
     }
 
+    // API 공통 에러 포맷(code/message/details)이면 실패로 처리
     if (response.body && response.body.code) {
         client.log("Scan failed. code=" + response.body.code + ", msg=" + response.body.message);
         client.log("details=" + JSON.stringify(response.body.details || {}));
@@ -126,7 +183,13 @@ Accept: application/json
 
 ###
 # ---------------------------------------------------------------------
-# 2) 레이어 다운로드
+# 2) 레이어 다운로드 (/download)
+#  - 스캔/캐시 기반 pre-check + latest 정책 적용
+#  - 서버 정책:
+#     * repo pullable 검증
+#     * resolveLatest=false + tag 지정 시 최신 태그 정책(TAG_NOT_LATEST) 적용
+#  - 다운로드 산출물(서버 파일):
+#     * manifest.json, blobs/, (옵션) config.json
 # ---------------------------------------------------------------------
 # @name downloadLayers
 POST {{host}}/api/ecr/download
@@ -156,8 +219,10 @@ Accept: application/json
 }
 
 > {%
+    // /download는 scan 결과(전역 repo/tag)가 준비되어 있지 않으면 실수 호출 가능성이 큼
+    // 따라서 scanOk가 아니면 "경고 로그"를 남김(요청은 실행됨)
     if (client.global.get("scanOk") !== "true") {
-        client.log("⚠️ Skip download: scanOk is not true. repositoryName/tag is empty or scan failed.");
+        client.log("scanOk is not true. repositoryName/tag may be empty or scan failed.");
     }
 
     if (response.body && response.body.code) {
@@ -180,6 +245,12 @@ Accept: application/json
 ###
 # ---------------------------------------------------------------------
 # 3) docker save tar(export) 다운로드
+#  - /export/docker-save
+#  - "로컬 산출물 기반" 정책:
+#     * (사전) /download 또는 /download/direct로 산출물이 생성되어 있어야 함
+#  - 응답:
+#     * Content-Type: application/x-tar
+#     * X-Server-Tar-Path: 서버 내부 tar 경로(디버깅/운영 확인용)
 # ---------------------------------------------------------------------
 # @name exportDockerSaveTar
 POST {{host}}/api/ecr/export/docker-save
@@ -210,8 +281,9 @@ Accept: application/x-tar
 }
 
 > {%
+    // export는 "로컬 산출물 기반"이므로 scanOk가 아니면 대개 실패 가능성이 높음
     if (client.global.get("scanOk") !== "true") {
-        client.log("⚠️ Skip export: scanOk is not true. repositoryName/tag is empty or scan failed.");
+        client.log("scanOk is not true. export may fail if local artifacts are missing.");
     }
 
     const ct = (response.headers && response.headers.valueOf("Content-Type"))
@@ -228,6 +300,131 @@ Accept: application/x-tar
         client.log("details=" + JSON.stringify(response.body.details || {}));
     } else {
         client.log("Export OK. Content-Type=" + ct);
+        client.log("Server tar path=" + (serverPath || "(missing header)"));
+        client.log("Tip: Use 'Save Response' in IntelliJ to save the tar locally.");
+    }
+%}
+
+###
+# ---------------------------------------------------------------------
+# 4) 레이어 다운로드 (/download/direct)
+#  - 스캔/정책검증 없이 "즉시" 다운로드
+#  - 용도:
+#     * repo/tag를 이미 알고 있고, 빠르게 산출물만 만들고 싶을 때
+#     * /scan이 느리거나 정책 검증을 피하고 싶을 때(테스트 목적)
+#  - 주의:
+#     * repo/tag 미존재, 권한 부족 등은 다운로드 과정에서 실패 가능
+# ---------------------------------------------------------------------
+# @name downloadLayersDirect
+POST {{host}}/api/ecr/download/direct
+Content-Type: application/json
+Accept: application/json
+
+{
+  "region": "{{region}}",
+  "accountId": "{{accountId}}",
+  "accessKeyId": "{{accessKeyId}}",
+  "secretAccessKey": "{{secretAccessKey}}",
+
+  "repositoryName": "{{repositoryName}}",
+  "tag": "{{tag}}",
+
+  "resolveLatest": false,
+  "includeConfig": true,
+  "verifySha256": true,
+
+  "concurrency": 4,
+  "maxRetries": 4,
+  "httpTimeoutSeconds": 180,
+  "outputDir": "./out",
+
+  "maxPages": 50,
+  "maxImages": 2000
+}
+
+> {%
+    // /download/direct 는 scanOk 여부와 무관하게 "바로 다운로드"가 목적이므로
+    // scanOk 체크는 "로그만" 남기고 요청 자체는 수행
+    if (client.global.get("scanOk") !== "true") {
+        client.log("scanOk is not true. /download/direct will still run without scan/pre-check.");
+    }
+
+    if (response.body && response.body.code) {
+        client.log("Direct download failed. code=" + response.body.code + ", msg=" + response.body.message);
+        client.log("details=" + JSON.stringify(response.body.details || {}));
+    } else if (response.body) {
+        client.log("resolvedTag=" + response.body.resolvedTag);
+        client.log("resolvedDigest=" + response.body.resolvedDigest);
+        client.log("layerCount=" + response.body.layerCount);
+        client.log("downloadedCount=" + response.body.downloadedCount);
+        client.log("outputPath=" + response.body.outputPath);
+        client.log("manifestPath=" + response.body.manifestPath);
+        client.log("configPath=" + response.body.configPath);
+        client.log("message=" + response.body.message);
+    } else {
+        client.log("Direct download response body is empty.");
+    }
+%}
+
+###
+# ---------------------------------------------------------------------
+# 5) (단일 호출) Direct 다운로드 + docker save tar(export)
+#  - /download/direct/docker-save
+#  - 특징:
+#     * /scan, 캐시, pullable, latest 정책 검증 없이 "즉시 다운로드" 후 tar까지 생성
+#     * 응답이 tar(application/x-tar)이므로, IntelliJ의 "Save Response"로 저장 권장
+#  - 주의:
+#     * 서버가 tar 생성에 성공해도 클라이언트가 저장하지 않으면 파일이 로컬에 남지 않음
+# ---------------------------------------------------------------------
+# @name downloadDirectAndExportDockerSaveTar
+POST {{host}}/api/ecr/download/direct/docker-save
+Content-Type: application/json
+Accept: application/x-tar
+
+{
+  "region": "{{region}}",
+  "accountId": "{{accountId}}",
+  "accessKeyId": "{{accessKeyId}}",
+  "secretAccessKey": "{{secretAccessKey}}",
+
+  "repositoryName": "{{repositoryName}}",
+  "tag": "{{tag}}",
+  "resolveLatest": false,
+
+  "includeConfig": true,
+  "verifySha256": true,
+  "outputDir": "./out",
+
+  "repoTag": "{{repositoryName}}:{{tag}}",
+  "fileNameHint": "docker-save_{{tag}}.tar",
+
+  "httpTimeoutSeconds": 180,
+  "maxRetries": 4,
+  "maxPages": 50,
+  "maxImages": 2000
+}
+
+> {%
+    // 이 엔드포인트는 scanOk와 무관하게 동작하도록 설계
+    // 따라서 scanOk는 참고 로그만 남기고 요청 자체는 수행
+    if (client.global.get("scanOk") !== "true") {
+        client.log("scanOk is not true. /download/direct/docker-save will still run without scan/pre-check.");
+    }
+
+    const ct = (response.headers && response.headers.valueOf("Content-Type"))
+        ? response.headers.valueOf("Content-Type")
+        : "";
+
+    const serverPath = (response.headers && response.headers.valueOf("X-Server-Tar-Path"))
+        ? response.headers.valueOf("X-Server-Tar-Path")
+        : "";
+
+    // JSON 에러면 출력
+    if (ct.includes("application/json") && response.body && response.body.code) {
+        client.log("Direct download+export failed. code=" + response.body.code + ", msg=" + response.body.message);
+        client.log("details=" + JSON.stringify(response.body.details || {}));
+    } else {
+        client.log("Direct download+export OK. Content-Type=" + ct);
         client.log("Server tar path=" + (serverPath || "(missing header)"));
         client.log("Tip: Use 'Save Response' in IntelliJ to save the tar locally.");
     }

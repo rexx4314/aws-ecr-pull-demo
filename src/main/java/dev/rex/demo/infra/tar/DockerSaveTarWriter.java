@@ -29,7 +29,6 @@ import java.util.zip.GZIPInputStream;
  * - TarArchiveEntry는 size가 필요
  * - gzip blob은 스트리밍으로 바로 tar에 넣으면 size를 알 수 없으므로 임시 파일로 풀어 size 확보 후 기록
  * <p>
- * Clean Code 포인트(팀 공유용):
  * - writeDockerSaveTar()는 오케스트레이션만 담당하고, 세부 로직은 private 메서드로 분리
  * - 입력 검증은 초기에 수행(guard clause)
  * - IOException 등 인프라 예외는 ApiException(ErrorCode)로 일관되게 래핑
@@ -81,7 +80,7 @@ public class DockerSaveTarWriter {
         mkdirsIfNeeded(tarPath.getParent());
 
         // 3) tar 쓰기(스트리밍)
-        //    - IOException이 발생 가능한 구간을 try 내부로 모아 컴파일 경고/Unhandled 문제를 예방
+        // - IOException이 발생 가능한 구간을 try 내부로 모아 컴파일 경고/Unhandled 문제를 예방
         try (OutputStream fos = Files.newOutputStream(
                 tarPath,
                 StandardOpenOption.CREATE,
@@ -94,13 +93,13 @@ public class DockerSaveTarWriter {
             tos.setLongFileMode(TarArchiveOutputStream.LONGFILE_POSIX);
 
             // 3-2) config 파일명/내용 준비
-            //      - docker save tar의 Config 필드는 "<something>.json"이어야 함
-            //      - 현재 프로젝트는 config.json로 고정
+            // - docker save tar의 Config 필드는 "<something>.json"이어야 함
+            // - 현재 config.json로 고정
             String configFileName = resolveConfigFileName(in);
             byte[] configBytes = readConfigBytesOrThrow(in);
 
             // 3-3) manifest.json / repositories 바이트 생성
-            //      - ObjectMapper 직렬화는 IOException이 날 수 있으므로 try 내부에서 수행
+            // - ObjectMapper 직렬화는 IOException이 날 수 있으므로 try 내부에서 수행
             byte[] manifestBytes = buildDockerSaveManifestBytes(in.repoTag(), configFileName, in.layerDigests());
             byte[] repositoriesBytes = buildRepositoriesJsonBytes(in.repoTag());
 
@@ -160,7 +159,7 @@ public class DockerSaveTarWriter {
             List<String> layerDigests
     ) throws IOException {
         // 1) 레이어 경로 배열 구성
-        //    - docker save는 각 레이어를 "{hex}/layer.tar" 형태로 참조
+        // - docker save는 각 레이어를 "{hex}/layer.tar" 형태로 참조
         List<String> layerPaths = new ArrayList<>(layerDigests.size());
         for (String dg : layerDigests) {
             String hex = DockerSaveNames.stripSha256Prefix(dg);
@@ -168,9 +167,9 @@ public class DockerSaveTarWriter {
         }
 
         // 2) docker save manifest 객체 구성
-        //    - Config: config json 파일명
-        //    - RepoTags: ["repo:tag"]
-        //    - Layers: ["{hex}/layer.tar", ...]
+        // - Config: config json 파일명
+        // - RepoTags: ["repo:tag"]
+        // - Layers: ["{hex}/layer.tar", ...]
         List<Map<String, Object>> dockerSaveManifest = List.of(
                 Map.of(
                         "Config", configFileName,
@@ -275,12 +274,12 @@ public class DockerSaveTarWriter {
             boolean gzip = isGzipStream(bis);
 
             // 3) payload 스트림 결정
-            //    - gzip이면 GZIPInputStream으로 풀고,
-            //    - 아니면 원본 그대로 사용
+            // - gzip이면 GZIPInputStream으로 풀고,
+            // - 아니면 원본 그대로 사용
             InputStream payload = gzip ? new GZIPInputStream(bis) : bis;
 
             // 4) tar는 entry size가 필요하므로 임시 파일에 먼저 풀어 기록
-            //    - 성능/디스크 비용이 있지만, tar 규격상 size가 필수라 안전한 선택
+            // - 성능/디스크 비용이 있지만, tar 규격상 size가 필수라 안전한 선택
             Path tmp = Files.createTempFile("layer-", ".tar");
             try {
                 // 4-1) payload -> tmp 로 풀기

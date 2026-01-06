@@ -60,8 +60,8 @@ public class DownloadLayout {
         Objects.requireNonNull(rootDir, "rootDir");
 
         // 1) basePath 규칙 구성
-        //    - accountId/region/folderKey는 sanitize 처리하여 path traversal/특수문자 문제를 완화
-        //    - repositoryName은 nested path를 허용(예: team/app)
+        // - accountId/region/folderKey는 sanitize 처리하여 path traversal/특수문자 문제를 완화
+        // - repositoryName은 nested path를 허용(예: team/app)
         this.basePath = rootDir
                 .resolve(sanitizeSegment(accountId))
                 .resolve(sanitizeSegment(region))
@@ -69,9 +69,9 @@ public class DownloadLayout {
                 .resolve(sanitizeSegment(folderKey));
 
         // 2) 필수 디렉토리 생성(초기화)
-        //    - blob 저장 공간
+        // - blob 저장 공간
         mkdirs(blobsSha256Dir());
-        //    - docker save export 공간
+        // - docker save export 공간
         mkdirs(exportDockerSaveDir());
     }
 

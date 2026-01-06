@@ -29,7 +29,6 @@ import java.util.Objects;
  * - 다운로드 레이아웃 구성 및 블롭 다운로드 호출
  *
  * <p>
- * 팀 공유용 Clean Code 리팩터링 포인트:
  * - “오케스트레이션” 메서드는 흐름만 남기고 세부 구현은 private 메서드로 분리
  * - 매직 스트링/접두어를 상수화하고, 공통 변환 로직을 한 곳으로 모음
  * - 예외 처리 정책(ErrorCode/메시지)은 기존 의도를 유지(필요한 곳에만 래핑)
@@ -93,39 +92,39 @@ public class EcrDownloadApplicationService {
         Objects.requireNonNull(req, "req");
 
         // 1) 옵션 정규화(기본값 적용 + 허용 범위 보정)
-        //    - concurrency, timeout, retries, scan limits 등을 일관된 정책으로 확정
+        // - concurrency, timeout, retries, scan limits 등을 일관된 정책으로 확정
         NormalizedOptions opt = normalizeOptions(req);
 
         // 2) ECR 클라이언트 생성(try-with-resources로 안전하게 close)
-        //    - 여기서부터는 “오케스트레이션 흐름”만 남기고 세부는 private 메서드로 위임
+        // - 여기서부터는 “오케스트레이션 흐름”만 남기고 세부는 private 메서드로 위임
         try (EcrClient ecr = createEcrClient(req)) {
 
             // 3) 이미지 레퍼런스 해석(tag/digest/latest)
-            //    - resolveLatest=true인 경우 최신 태그를 스캔해 resolvedTag/digest 후보를 결정
+            // - resolveLatest=true인 경우 최신 태그를 스캔해 resolvedTag/digest 후보를 결정
             ImageRefResolver.ResolvedImageRef ref = resolveImageRef(ecr, req, opt);
 
             // 4) 매니페스트 조회(ECR API)
-            //    - 이미지 레퍼런스(ref)에 해당하는 manifest JSON 문자열을 획득
+            // - 이미지 레퍼런스(ref)에 해당하는 manifest JSON 문자열을 획득
             String manifestJson = fetchManifest(ecr, req, ref);
 
             // 5) 매니페스트 파싱/검증
-            //    - manifest list(멀티 아키텍처) 등 현재 미지원 형식을 이 단계에서 차단
+            // - manifest list(멀티 아키텍처) 등 현재 미지원 형식을 이 단계에서 차단
             ParsedManifest parsed = validateAndParseManifest(manifestJson);
 
             // 6) 저장 레이아웃 확정(로컬 저장 경로)
-            //    - folderKey 규칙은 buildFolderKey에 캡슐화(추후 export와 동일 규칙 공유 용이)
+            // - folderKey 규칙은 buildFolderKey에 캡슐화
             DownloadLayout layout = buildLayout(opt.outputDir(), req, ref);
 
             // 7) 매니페스트 저장
-            //    - 로컬 산출물(manifest.json)을 먼저 저장하여, 이후 단계에서 재사용 가능하게 함
+            // - 로컬 산출물(manifest.json)을 먼저 저장하여, 이후 단계에서 재사용 가능하게 함
             Path manifestPath = writeManifest(layout, manifestJson);
 
             // 8) 다운로드 계획 구성
-            //    - layers/configDigest를 추출하고 필수 조건(layers 존재)을 검증
+            // - layers/configDigest를 추출하고 필수 조건(layers 존재)을 검증
             DownloadPlan plan = buildDownloadPlan(parsed);
 
             // 9) 레이어/설정 blob 다운로드(병렬)
-            //    - DownloadExecutor가 토큰 획득/병렬 제출/실패 집계/부분 성공 정책을 담당
+            // - DownloadExecutor가 토큰 획득/병렬 제출/실패 집계/부분 성공 정책을 담당
             DownloadExecutor.DownloadOutcome out = downloadExecutor.downloadAllBlobs(
                     ecr,
                     req.accountId(),
@@ -141,7 +140,7 @@ public class EcrDownloadApplicationService {
             );
 
             // 10) digest 확정(필요 시)
-            //     - tag/latest 기반 요청은 실제 digest를 확정하여 결과에 포함
+            // - tag/latest 기반 요청은 실제 digest를 확정하여 결과에 포함
             String resolvedDigest = resolveDigestIfNeeded(ecr, req, ref);
 
             // 11) 결과 DTO 구성(반환 포맷을 한 곳에서 관리)
@@ -153,7 +152,7 @@ public class EcrDownloadApplicationService {
 
         } catch (EcrException e) {
             // 13) AWS ECR 예외는 표준 ErrorCode로 래핑
-            //     - 사용자 메시지는 safeAwsMsg로 안전하게 추출
+            // - 사용자 메시지는 safeAwsMsg로 안전하게 추출
             throw new ApiException(
                     ErrorCode.DOWNLOAD_ECR_API_FAILED,
                     "ECR 처리 실패: " + safeAwsMsg(e),
@@ -176,7 +175,7 @@ public class EcrDownloadApplicationService {
      * ECR 클라이언트 생성
      */
     private EcrClient createEcrClient(EcrDownloadRequest req) {
-        // AWS SDK 클라이언트는 close 대상이므로 호출자는 try-with-resources로 감싸야 함
+        // AWS SDK 클라이언트는 close 대상이므로 호출자는 try-with-resources로 처리
         return factory.create(
                 req.region(),
                 req.accessKeyId(),
@@ -193,26 +192,26 @@ public class EcrDownloadApplicationService {
      */
     private NormalizedOptions normalizeOptions(EcrDownloadRequest req) {
         // 1) concurrency 보정
-        //    - null이면 defaultConcurrency
-        //    - 최소 1, 최대 maxConcurrency로 clamp
+        // - null이면 defaultConcurrency
+        // - 최소 1, 최대 maxConcurrency로 clamp
         int concurrency = clamp(nvl(req.concurrency(), defaultConcurrency), 1, maxConcurrency);
 
         // 2) httpTimeoutSeconds 보정
-        //    - null 또는 <=0이면 defaultHttpTimeoutSeconds 적용
+        // - null 또는 <=0이면 defaultHttpTimeoutSeconds 적용
         int httpTimeoutSeconds = positiveOrDefault(req.httpTimeoutSeconds(), defaultHttpTimeoutSeconds);
 
         // 3) maxRetries 보정
-        //    - null 또는 <0이면 defaultMaxRetries 적용(0 이상 허용)
+        // - null 또는 <0이면 defaultMaxRetries 적용(0 이상 허용)
         int maxRetries = nonNegativeOrDefault(req.maxRetries(), defaultMaxRetries);
 
         // 4) resolveLatest 스캔 제한 보정
-        //    - maxPages/maxImages는 과도한 스캔을 방지하기 위한 안전장치
+        // - maxPages/maxImages는 과도한 스캔을 방지하기 위한 안전장치
         int maxPages = positiveOrDefault(req.maxPages(), defaultMaxPages);
         int maxImages = positiveOrDefault(req.maxImages(), defaultMaxImages);
 
         // 5) 플래그/경로 확정
-        //    - verifySha256/includeConfig는 그대로 사용
-        //    - outputDir이 비어있으면 defaultBaseDir 적용
+        // - verifySha256/includeConfig는 그대로 사용
+        // - outputDir이 비어있으면 defaultBaseDir 적용
         boolean verifySha256 = req.verifySha256();
         boolean includeConfig = req.includeConfig();
         String outputDir = StringUtils.defaultIfBlank(req.outputDir(), defaultBaseDir);
@@ -301,13 +300,13 @@ public class EcrDownloadApplicationService {
      */
     private DownloadPlan buildDownloadPlan(ParsedManifest parsed) {
         // 1) layers/configDigest 추출
-        //    - layers는 null 안전 처리
-        //    - configDigest는 공백 제거 후 null 가능
+        // - layers는 null 안전 처리
+        // - configDigest는 공백 제거 후 null 가능
         List<String> layerDigests = safeList(parsed.layerDigests());
         String configDigest = StringUtils.trimToNull(parsed.configDigest());
 
         // 2) 필수 조건 검증: 레이어가 없으면 정상 이미지로 보기 어려움
-        //    - 이후 다운로드/검증/압축 과정이 모두 무의미해지므로 여기서 조기 실패
+        // - 이후 다운로드/검증/압축 과정이 모두 무의미해지므로 여기서 조기 실패
         if (layerDigests.isEmpty()) {
             throw new ApiException(
                     ErrorCode.DOWNLOAD_TASK_FAILED,
@@ -316,7 +315,7 @@ public class EcrDownloadApplicationService {
         }
 
         // 3) 다운로드 계획 반환
-        //    - configDigest는 includeConfig 옵션에 따라 실제 다운로드 대상이 될 수도/안될 수도 있음
+        // - configDigest는 includeConfig 옵션에 따라 실제 다운로드 대상이 될 수도/안될 수도 있음
         return new DownloadPlan(layerDigests, configDigest);
     }
 

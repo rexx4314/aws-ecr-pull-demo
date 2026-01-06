@@ -27,19 +27,20 @@ import java.util.concurrent.*;
  * - ECR에서 Docker 이미지의 레이어(layer)와 설정(config)을 병렬로 다운로드
  * - 실패 시 재시도 정책 지원
  * - SHA-256 검증 옵션 제공
- * - 부분 성공/실패 처리
+ * - fail-fast 처리(하나라도 실패하면 전체 실패 + 남은 다운로드 취소)
  * <p>
  * 설계 특징
  * - CompletionService로 병렬 작업 관리 (순서 무관 수집)
  * - 데몬 스레드 풀로 백그라운드 실행
  * - 실패 시 digest별 ErrorCode 분류 및 요약 제공
  * - 인터럽트/타임아웃 안전 처리
+ * - 첫 실패 감지 시 Future.cancel(true) + pool.shutdownNow()로 즉시 중단 시도
  * <p>
  * 처리 흐름
  * 1) ECR 인증 토큰 획득 (fetchBasicAuthToken)
  * 2) 레이어/설정 다운로드 작업을 병렬 제출 (submitAllTasks)
- * 3) 결과 수집 및 실패 집계 (take().get())
- * 4) 부분 실패 시 예외 발생 (throwIfAnyFailure)
+ * 3) 결과 수집 (take().get())
+ * 4) 첫 실패 발생 시 전체 실패로 전환 + 남은 다운로드 취소 (collectResults fail-fast)
  * 5) 성공 시 다운로드 개수 및 설정 경로 반환
  */
 @Slf4j
@@ -74,7 +75,7 @@ public class DownloadExecutor {
      * - 다운로드 성공한 레이어 개수 + 설정 파일 경로
      * <p>
      * 예외
-     * - 실패 시 ApiException (부분 실패 포함)
+     * - 실패 시 ApiException (fail-fast: 하나라도 실패하면 전체 실패)
      *
      * @return 다운로드 결과 (레이어 개수, 설정 경로)
      */
@@ -92,28 +93,31 @@ public class DownloadExecutor {
             boolean verifySha256
     ) {
         // 1) 입력 파라미터 검증
-        //    - 필수 값 누락/범위 오류를 초기에 차단하여 이후 오류 원인 추적을 단순화
+        // - 필수 값 누락/범위 오류를 초기에 차단하여 이후 오류 원인 추적을 단순화
         validateArgs(ecr, accountId, repositoryName, layout, concurrency, httpTimeoutSeconds, maxRetries);
 
         // 2) ECR 인증 토큰 획득
-        //    - blob 다운로드(HTTP)에서 Authorization: Basic {token} 용도로 사용됨
-        //    - 토큰이 없으면 모든 다운로드가 실패하므로 선행 단계로 수행
+        // - blob 다운로드(HTTP)에서 Authorization: Basic {token} 용도로 사용됨
+        // - 토큰이 없으면 모든 다운로드가 실패하므로 선행 단계로 수행
         String basicToken = fetchBasicAuthToken(ecr, accountId);
 
         // 3) 병렬 다운로드 스레드 풀 생성(데몬 스레드)
-        //    - 요청 단위로 생성/폐기하는 구조라 finally에서 반드시 종료
+        // - 요청 단위로 생성/폐기하는 구조라 finally에서 반드시 종료
         ExecutorService pool = newFixedDaemonPool(concurrency, "layer-dl-");
 
         try {
             // 4) CompletionService
-            //    - Future를 “완료되는 순서대로” 수집할 수 있어 대기/집계 로직을 단순화
+            // - Future를 “완료되는 순서대로” 수집할 수 있어 대기/집계 로직을 단순화
             CompletionService<SuccessItem> ecs = new ExecutorCompletionService<>(pool);
 
             // 5) 다운로드 작업 제출
-            //    - layer digests 각각 + (옵션에 따라) config digest 1건
-            //    - submitAllTasks는 제출된 작업 수를 반환하며, 이는 결과 수집 루프 횟수로 사용
+            // - layer digests 각각 + (옵션에 따라) config digest 1건
+            // - submitAllTasks는 제출된 작업 수를 반환하며, 이는 결과 수집 루프 횟수로 사용
+            // - fail-fast 취소를 위해 Future 목록을 함께 수집
+            List<Future<SuccessItem>> futures = new ArrayList<>();
             int submitted = submitAllTasks(
                     ecs,
+                    futures,
                     ecr,
                     accountId,
                     repositoryName,
@@ -127,12 +131,13 @@ public class DownloadExecutor {
                     verifySha256
             );
 
-            // 6) 결과 수집 및 집계
-            //    - 성공: 레이어 카운트 증가 또는 configPath 설정
-            //    - 실패: ExecutionException.getCause()를 FailureItem으로 변환하여 누적
-            Aggregation agg = collectResults(ecs, submitted);
+            // 6) 결과 수집 및 집계 (fail-fast)
+            // - 성공: 레이어 카운트 증가 또는 configPath 설정
+            // - 실패: 첫 실패 즉시 전체 실패 처리 + 남은 Future 취소 + pool 중단 시도
+            Aggregation agg = collectResults(ecs, submitted, futures, pool);
 
-            // 7) 실패가 존재하면 예외 발생(부분 성공/전체 실패를 ErrorCode로 구분)
+            // 7) (정상 완료 시) 실패가 존재하면 예외 발생(부분 성공/전체 실패를 ErrorCode로 구분)
+            // - 현재 정책은 fail-fast, collectResults에서 실패가 나면 즉시 예외 발생
             throwIfAnyFailure(agg.failures, agg.okLayers, agg.okConfig);
 
             // 8) 성공 결과 반환
@@ -140,21 +145,29 @@ public class DownloadExecutor {
 
         } catch (InterruptedException ie) {
             // 9) 인터럽트 발생 시
-            //    - 인터럽트 상태를 복구하고(권장 패턴) 중단으로 처리
+            // - 인터럽트 상태를 복구하고 중단으로 처리
             Thread.currentThread().interrupt();
             throw new ApiException(ErrorCode.DOWNLOAD_THREAD_INTERRUPTED, "다운로드 중단됨", null, ie);
 
         } finally {
             // 10) 스레드 풀 정리
-            //     - 작업이 남아있을 수 있으므로 shutdownNow로 즉시 중단 시도
+            // - 작업이 남아있을 수 있으므로 shutdownNow로 즉시 중단 시도
             pool.shutdownNow();
         }
     }
 
     /**
      * 결과 수집(순서 무관) 및 실패 집계
+     * <p>
+     * - fail-fast 정책:
+     * - 첫 실패(ExecutionException/CancellationException) 발생 즉시 남은 작업을 취소하고 전체 실패로 종료
      */
-    private Aggregation collectResults(CompletionService<SuccessItem> ecs, int submitted) throws InterruptedException {
+    private Aggregation collectResults(
+            CompletionService<SuccessItem> ecs,
+            int submitted,
+            List<Future<SuccessItem>> futures,
+            ExecutorService pool
+    ) throws InterruptedException {
         // 성공 집계
         int okLayers = 0;
         boolean okConfig = false;
@@ -163,7 +176,7 @@ public class DownloadExecutor {
         // 실패 집계
         List<FailureItem> failures = new ArrayList<>();
 
-        // 제출된 작업 수만큼 완료 결과를 수집해야 함
+        // 제출된 작업 수만큼 완료 결과를 수집
         for (int i = 0; i < submitted; i++) {
             try {
                 // take(): 완료된 작업이 나올 때까지 블록(InterruptedException 가능)
@@ -178,11 +191,32 @@ public class DownloadExecutor {
                 } else {
                     okLayers++;
                 }
+
             } catch (ExecutionException ee) {
-                // 개별 작업 실패
-                // - 원인 예외를 FailureItem으로 변환하여 누적
+                // 개별 작업 실패 (fail-fast)
+                // - 원인 예외를 FailureItem으로 변환하여 요약에 반영
                 // - DigestTaggedException이면 digest/code가 보존됨
-                failures.add(toFailureItem(ee.getCause()));
+                FailureItem f = toFailureItem(ee.getCause());
+
+                // 1) 남은 작업 즉시 취소 시도
+                cancelAll(futures);
+
+                // 2) 실행 중인 작업 인터럽트 시도
+                pool.shutdownNow();
+
+                // 3) 전체 실패로 즉시 종료
+                String summary = buildFailureSummary(List.of(f));
+                throw new ApiException(ErrorCode.DOWNLOAD_TASK_FAILED, summary, null, ee.getCause());
+
+            } catch (CancellationException ce) {
+                // 작업이 취소된 경우 (fail-fast/외부 취소 등)
+                FailureItem f = new FailureItem(null, ErrorCode.DOWNLOAD_THREAD_INTERRUPTED, safeMsg(ce));
+
+                cancelAll(futures);
+                pool.shutdownNow();
+
+                String summary = buildFailureSummary(List.of(f));
+                throw new ApiException(ErrorCode.DOWNLOAD_TASK_FAILED, summary, null, ce);
             }
         }
 
@@ -205,7 +239,7 @@ public class DownloadExecutor {
             int httpTimeoutSeconds,
             int maxRetries
     ) {
-        // 필수값 검증(원인 명확화)
+        // 필수값 검증
         if (ecr == null) throw new ApiException(ErrorCode.DOWNLOAD_TASK_FAILED, "ECR 클라이언트가 null 입니다");
         if (StringUtils.isBlank(accountId)) throw new ApiException(ErrorCode.DOWNLOAD_TASK_FAILED, "accountId가 비어있습니다");
         if (StringUtils.isBlank(repositoryName))
@@ -253,6 +287,7 @@ public class DownloadExecutor {
      */
     private int submitAllTasks(
             CompletionService<SuccessItem> ecs,
+            List<Future<SuccessItem>> futuresOut,
             EcrClient ecr,
             String accountId,
             String repositoryName,
@@ -269,8 +304,8 @@ public class DownloadExecutor {
         int submitted = 0;
 
         // 1) 레이어 다운로드 작업 제출
-        //    - digest는 trimToNull로 정규화(공백/빈 문자열 제거)
-        //    - outPath는 digest별로 layout 규칙에 따라 결정
+        // - digest는 trimToNull로 정규화(공백/빈 문자열 제거)
+        // - outPath는 digest별로 layout 규칙에 따라 결정
         for (String digest : layerDigests) {
             String d = StringUtils.trimToNull(digest);
             if (d == null) continue;
@@ -278,7 +313,7 @@ public class DownloadExecutor {
             // Callable 작업:
             // - downloadOne이 성공하면 SuccessItem 반환
             // - 실패하면 DigestTaggedException을 던져 digest/code를 상위로 보존
-            ecs.submit(() -> downloadOne(
+            Future<SuccessItem> f = ecs.submit(() -> downloadOne(
                     ecr,
                     accountId,
                     repositoryName,
@@ -290,17 +325,18 @@ public class DownloadExecutor {
                     verifySha256,
                     false
             ));
+            futuresOut.add(f);
             submitted++;
         }
 
         // 2) 설정(config) 다운로드 작업 제출(옵션 기반)
-        //    - includeConfig=true일 때만 다운로드 대상으로 포함
-        //    - configDigest가 빈 값이면 제출하지 않음
+        // - includeConfig=true일 때만 다운로드 대상으로 포함
+        // - configDigest가 빈 값이면 제출하지 않음
         if (includeConfig && StringUtils.isNotBlank(configDigest)) {
             String d = configDigest.trim();
 
             // config 파일은 레이어와 달리 경로가 고정(layout.configPath())
-            ecs.submit(() -> downloadOne(
+            Future<SuccessItem> f = ecs.submit(() -> downloadOne(
                     ecr,
                     accountId,
                     repositoryName,
@@ -312,6 +348,7 @@ public class DownloadExecutor {
                     verifySha256,
                     true
             ));
+            futuresOut.add(f);
             submitted++;
         }
 
@@ -324,6 +361,11 @@ public class DownloadExecutor {
      * <p>
      * - 부분 성공: DOWNLOAD_PARTIAL_SUCCESS
      * - 전체 실패: DOWNLOAD_TASK_FAILED
+     * <p>
+     * NOTE:
+     * - 현재 DownloadExecutor는 fail-fast 정책(첫 실패 즉시 종료)을 사용하므로,
+     * collectResults에서 실패가 발생하면 즉시 예외가 발생하여 이 메서드까지 도달하지 않음
+     * - 다만 정책 변경/재사용 가능성을 위해 메서드는 유지
      */
     private void throwIfAnyFailure(List<FailureItem> failures, int okLayers, boolean okConfig) {
         // 실패가 없으면 정상 종료
@@ -552,6 +594,25 @@ public class DownloadExecutor {
         }
 
         return sb.toString();
+    }
+
+    /**
+     * 남은 작업 일괄 취소(best-effort)
+     * <p>
+     * - cancel(true)로 인터럽트를 요청
+     * - 이미 완료된 작업은 영향 없음
+     */
+    private void cancelAll(List<Future<SuccessItem>> futures) {
+        if (futures == null || futures.isEmpty()) return;
+        for (Future<SuccessItem> f : futures) {
+            if (f == null) continue;
+            if (!f.isDone()) {
+                try {
+                    f.cancel(true);
+                } catch (Exception ignored) {
+                }
+            }
+        }
     }
 
     /**

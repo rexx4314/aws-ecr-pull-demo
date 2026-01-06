@@ -41,19 +41,21 @@ import java.util.Objects;
  * <p>
  * 설계/정책:
  * - 다운로드는 "임시 파일(.part)"에 먼저 저장하고, 검증 성공 후 target으로 커밋(move)
- * - HTTP 401/403이 나오면 Basic Auth 헤더를 붙여 1회 재시도(토큰이 있을 때만).
+ * - HTTP 401/403이 나오면 Basic Auth 헤더를 붙여 1회 재시도(토큰이 있을 때만)
  * - 재시도는 최대 retries회. (호출자가 0을 줘도 최소 1회 보장)
  * - 파일 시스템 오류는 가능한 범위에서 ErrorCode로 분류
+ *
+ * <p>
+ * fail-fast 취소 지원:
+ * - 상위에서 Future.cancel(true)/shutdownNow()가 호출되면 인터럽트 전파
+ * - 스트리밍 루프에서 인터럽트를 체크하여 가능한 빨리 중단
  */
 @Slf4j
 @Component
 public class BlobDownloader {
 
-    // =========================
-    // HTTP Client (shared)
-    // =========================
     /**
-     * Java HttpClient는 thread-safe로 공유 가능.
+     * Java HttpClient는 thread-safe로 공유 가능
      * - follow redirects: presigned URL이 redirect 될 수 있어 NORMAL 적용
      * - connect timeout: connect 자체 제한
      */
@@ -62,18 +64,11 @@ public class BlobDownloader {
             .connectTimeout(Duration.ofSeconds(10))
             .build();
 
-    // =========================
-    // Backoff config
-    // =========================
     @Value("${app.download.backoffBaseMillis:300}")
     private long backoffBaseMillis;
 
     @Value("${app.download.backoffMaxMillis:5000}")
     private long backoffMaxMillis;
-
-    // =========================
-    // Public API
-    // =========================
 
     /**
      * 단일 레이어 Blob 다운로드
@@ -113,8 +108,8 @@ public class BlobDownloader {
         String digest = requireText(layerDigest, "layerDigest");
 
         // 1) 재시도/타임아웃 정규화
-        //    - maxRetries: 0이 들어와도 최소 1회는 시도
-        //    - timeout: 0/음수면 기본 180초
+        // - maxRetries: 0이 들어와도 최소 1회는 시도
+        // - timeout: 0/음수면 기본 180초
         int retries = Math.max(1, maxRetries);
         int timeoutSec = (httpTimeoutSeconds <= 0) ? 180 : httpTimeoutSeconds;
 
@@ -148,9 +143,9 @@ public class BlobDownloader {
                 }
 
                 // 4-4) 그 외 비정상 상태코드는 즉시 실패(재시도 대상 아님)
-                //      - 401/403: 인증/권한
-                //      - 404: blob not found
-                //      - 나머지: unexpected status
+                // - 401/403: 인증/권한
+                // - 404: blob not found
+                // - 나머지: unexpected status
                 if (!is2xx(code)) {
                     URI uri = URI.create(downloadUrl);
                     closeQuiet(resp);
@@ -170,7 +165,7 @@ public class BlobDownloader {
                 }
 
                 // 4-5) 본문 스트리밍 저장 + (옵션) sha 계산
-                //      - verifySha256=true일 때만 sha256을 계산/반환
+                // - verifySha256=true일 때만 sha256을 계산/반환
                 String computedHex;
                 try (InputStream body = resp.body()) {
                     computedHex = streamToFileAndDigest(body, tmp, verifySha256);
@@ -262,8 +257,8 @@ public class BlobDownloader {
 
             } catch (IOException ioe) {
                 // 10) I/O 오류(대부분 HTTP send/stream 중 네트워크 오류로 간주)
-                //     - 마지막 시도면 실패
-                //     - 아니면 백오프 후 재시도
+                // - 마지막 시도면 실패
+                // - 아니면 백오프 후 재시도
                 safeDelete(tmp);
 
                 if (attempt >= retries) {
@@ -306,10 +301,6 @@ public class BlobDownloader {
                 Map.of("digest", Masking.maskDigest(digest))
         );
     }
-
-    // =========================
-    // ECR: presigned URL
-    // =========================
 
     /**
      * GetDownloadUrlForLayer를 호출하여 presigned download URL을 얻음
@@ -367,10 +358,6 @@ public class BlobDownloader {
         }
     }
 
-    // =========================
-    // HTTP download
-    // =========================
-
     /**
      * HTTP GET 요청 전송
      * <p>
@@ -397,17 +384,17 @@ public class BlobDownloader {
         return http.send(rb.build(), HttpResponse.BodyHandlers.ofInputStream());
     }
 
-    // =========================
-    // Streaming + digest
-    // =========================
-
     /**
      * InputStream을 파일로 스트리밍 저장하면서 (옵션) SHA-256 digest를 계산
      * <p>
      * - digestOn=true면 SHA-256 계산 후 hex 문자열 반환
      * - digestOn=false면 파일만 저장하고 null 반환(계산 비용 절감)
+     *
+     * <p>
+     * fail-fast 취소 지원:
+     * - 인터럽트가 감지되면 즉시 InterruptedException을 발생시켜 상위에서 중단 처리
      */
-    private String streamToFileAndDigest(InputStream in, Path tmp, boolean digestOn) throws IOException {
+    private String streamToFileAndDigest(InputStream in, Path tmp, boolean digestOn) throws IOException, InterruptedException {
         // 1) digest 사용 여부에 따라 MessageDigest 초기화
         MessageDigest md = null;
         if (digestOn) {
@@ -419,13 +406,18 @@ public class BlobDownloader {
         }
 
         // 2) 파일로 스트리밍 저장(64KB 버퍼)
-        //    - CREATE + TRUNCATE로 기존 .part가 있으면 덮어쓰기
+        // - CREATE + TRUNCATE로 기존 .part가 있으면 덮어쓰기
         try (OutputStream os = Files.newOutputStream(tmp, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
             byte[] buf = new byte[64 * 1024];
             int n;
 
             while ((n = in.read(buf)) >= 0) {
                 if (n == 0) continue;
+
+                // 인터럽트 감지 시 즉시 중단 (상위에서 DOWNLOAD_THREAD_INTERRUPTED로 처리)
+                if (Thread.currentThread().isInterrupted()) {
+                    throw new InterruptedException("download stream interrupted");
+                }
 
                 // 파일 쓰기
                 os.write(buf, 0, n);
@@ -443,10 +435,6 @@ public class BlobDownloader {
         // 4) SHA-256 hex 문자열 반환
         return toHex(md.digest());
     }
-
-    // =========================
-    // SHA-256 verify
-    // =========================
 
     /**
      * digest(예: sha256:xxx)와 computedHex를 비교하여 무결성을 검증
@@ -481,10 +469,6 @@ public class BlobDownloader {
         }
     }
 
-    // =========================
-    // Commit tmp -> target
-    // =========================
-
     /**
      * 임시 파일을 최종 경로로 커밋(move)
      * <p>
@@ -500,10 +484,6 @@ public class BlobDownloader {
         }
     }
 
-    // =========================
-    // Retry backoff
-    // =========================
-
     /**
      * 백오프 계산 및 sleep + 로깅
      * <p>
@@ -517,10 +497,6 @@ public class BlobDownloader {
 
         Retry.sleepQuiet(backoff);
     }
-
-    // =========================
-    // Classification helpers
-    // =========================
 
     /**
      * ECR 예외를 서비스 ErrorCode로 분류
@@ -572,10 +548,6 @@ public class BlobDownloader {
 
         return ErrorCode.DOWNLOAD_FS_WRITE_FAILED;
     }
-
-    // =========================
-    // Small utilities
-    // =========================
 
     /**
      * HTTP status 판정 유틸
@@ -690,10 +662,6 @@ public class BlobDownloader {
         String h = uri.getHost();
         return (h == null) ? "(unknown)" : h;
     }
-
-    // =========================
-    // Internal exception type
-    // =========================
 
     /**
      * HTTP status 기반 "재시도 가능" 신호용 내부 예외

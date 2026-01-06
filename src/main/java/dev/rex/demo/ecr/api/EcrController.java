@@ -40,7 +40,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * - /export/docker-save : 로컬 산출물 기반으로 docker-save tar 생성 후 파일 다운로드 응답 반환
  *
  * <p>
- * 설계 포인트(Clean Code):
+ * 설계 포인트:
  * - Controller는 "흐름/정책 검증/응답 구성"만 담당
  * - 복잡한 로직은 private 메서드로 분리(의도 드러내기)
  * - 로그/마스킹/예외코드 매핑 정책을 명확히 고정
@@ -182,12 +182,169 @@ public class EcrController {
         Path tar = r.tarPath();
 
         // 4) 응답 파일명/서버 내부 경로
-        //    - 파일명은 클라이언트 다운로드명으로 사용
-        //    - server path는 디버깅/운영 확인용(보안 고려 필요 시 제거/마스킹 권장)
+        // - 파일명은 클라이언트 다운로드명으로 사용
+        // - server path는 디버깅/운영 확인용(보안 고려 필요 시 제거/마스킹 권장)
         String fileName = tar.getFileName().toString();
         String serverTarPath = tar.toAbsolutePath().toString();
 
         // 5) 파일 다운로드 응답 구성
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + fileName + "\"")
+                .header("X-Server-Tar-Path", serverTarPath)
+                .contentType(MediaType.parseMediaType(TAR_MIME))
+                .body(new FileSystemResource(tar));
+    }
+
+    /**
+     * ECR 이미지 다운로드(Direct)
+     *
+     * <p>
+     * 목적:
+     * - ecr repo/tag(or digest) + aws 계정 정보를 입력받아 "즉시" 다운로드를 수행
+     *
+     * <p>
+     * 차이점(/download 대비):
+     * - 사전 스캔/캐시 조회를 수행하지 않음
+     * - repo pullable 검증을 수행하지 않음
+     * - latest tag 정책 검증(TAG_NOT_LATEST)을 수행하지 않음
+     *
+     * <p>
+     * 주의:
+     * - repo 미존재/태그 미존재/권한 부족 등은 다운로드 과정에서 ApiException으로 실패할 수 있음
+     * - 운영 환경에서는 호출 남용 방지(레이트 리밋/권한/감사로그) 정책이 필요할 수 있음
+     *
+     * @param req 다운로드 요청(스캔 없이 직접 수행)
+     * @return 다운로드 결과(로컬 경로 포함)
+     */
+    @PostMapping(value = "/download/direct", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
+    public EcrDownloadResponse downloadDirect(@Valid @RequestBody EcrDownloadRequest req) {
+
+        // 1) 로그에 표시할 이미지 참조(태그/다이제스트)
+        String tagOrDigest = resolveTagOrDigest(req);
+
+        // 2) 요청 로깅(민감정보 마스킹)
+        // - pre-check를 생략하는 엔드포인트이므로 direct 표기
+        log.info("ECR direct download requested. region={}, accountId={}, repo={}, imageRef(tag/digest)={}, accessKeyId={}, resolveLatest={}",
+                req.region(),
+                req.accountId(),
+                req.repositoryName(),
+                tagOrDigest,
+                Masking.maskAccessKeyId(req.accessKeyId()),
+                req.resolveLatest()
+        );
+
+        // 3) 다운로드 오케스트레이션(서비스 레이어로 위임)
+        // - /download의 사전 검증을 모두 생략하고 즉시 다운로드 수행
+        DownloadResult r = manifestService.downloadByEcrApi(req);
+
+        // 4) 컨트롤러 응답 DTO로 변환
+        return new EcrDownloadResponse(
+                r.resolvedTag(),
+                r.resolvedDigest(),
+                r.layerCount(),
+                r.downloadedCount(),
+                r.outputPath(),
+                r.manifestPath(),
+                r.configPath(),
+                r.message()
+        );
+    }
+
+    /**
+     * ECR 이미지 다운로드(Direct) + docker-save tar export (단일 호출)
+     *
+     * <p>
+     * 목적:
+     * - ecr repo/tag(or digest) + aws 계정 정보를 입력받아
+     *   "스캔/정책검증 없이 즉시 다운로드" 후, 곧바로 docker-save tar까지 생성
+     *
+     * <p>
+     * 설계/재사용:
+     * - 요청 DTO는 export DTO(EcrDockerSaveExportRequest)를 그대로 재사용
+     * - 내부에서 EcrDownloadRequest를 생성하여 기존 다운로드 서비스(manifestService)를 재사용
+     * - tar 생성은 기존 export 서비스(dockerSaveExportService)를 그대로 재사용
+     *
+     * <p>
+     * 차이점(기존 /download + /export/docker-save 대비):
+     * - /scan, 캐시, pullable 검증, TAG_NOT_LATEST 정책 검증을 모두 생략
+     * - 한 번의 호출로 "다운로드 -> tar export"를 서버에서 연속 수행
+     *
+     * <p>
+     * 주의:
+     * - repo/tag 미존재, 권한 부족, 네트워크 오류 등은 다운로드 단계에서 ApiException으로 실패할 수 있음
+     * - export는 "로컬 산출물 기반"이므로, 다운로드 산출물 생성이 실패하면 export도 수행할 수 없음
+     * - 운영 환경에서는 호출 남용 방지(레이트리밋/권한/감사로그) 정책이 필요할 수 있음
+     *
+     * @param req 다운로드+export 요청(스캔 없이 직접 수행)
+     * @return tar 파일을 body로 갖는 ResponseEntity
+     */
+    @PostMapping(value = "/download/direct/docker-save", consumes = MediaType.APPLICATION_JSON_VALUE, produces = TAR_MIME)
+    public ResponseEntity<FileSystemResource> downloadDirectAndExportDockerSave(@Valid @RequestBody EcrDockerSaveExportRequest req) {
+
+        // 1) 로그용 이미지 참조(태그/다이제스트)
+        String imageRef = StringUtils.isNotBlank(req.tag()) ? req.tag() : req.digest();
+
+        // 2) 요청 로깅(민감정보 마스킹)
+        // - direct + export 결합 엔드포인트이므로 목적이 명확하도록 로그명을 고정
+        log.info("ECR direct download+export docker-save requested. region={}, accountId={}, repo={}, imageRef(tag/digest)={}, accessKeyId={}, resolveLatest={}",
+                req.region(),
+                req.accountId(),
+                req.repositoryName(),
+                Objects.toString(imageRef, "(null)"),
+                Masking.maskAccessKeyId(req.accessKeyId()),
+                req.resolveLatest()
+        );
+
+        // 3) (Direct) 다운로드 요청 구성
+        // - export 요청 DTO를 그대로 받고, 다운로드에 필요한 필드만 추려 EcrDownloadRequest로 변환
+        // - 스캔/정책 검증은 생략
+        //
+        // 주의:
+        // - EcrDownloadRequest의 필드 중 export 요청에 없는 값은 "보수적 기본값"을 사용
+        // - (예) concurrency는 export 요청에 없으므로 일반적으로 많이 쓰는 4로 고정
+        EcrDownloadRequest downloadReq = new EcrDownloadRequest(
+                req.region(),
+                req.accountId(),
+                req.accessKeyId(),
+                req.secretAccessKey(),
+                req.sessionToken(),          // ✅ sessionToken 전달
+                req.repositoryName(),
+                req.tag(),
+                req.digest(),                // ✅ digest 전달
+                req.resolveLatest(),
+                req.includeConfig(),
+                req.verifySha256(),
+                req.outputDir(),
+                4,                           // concurrency (export 요청에 없으므로 기본값)
+                req.maxRetries(),            // ✅ 순서: maxRetries
+                req.httpTimeoutSeconds(),    // ✅ 순서: httpTimeoutSeconds
+                req.maxPages(),
+                req.maxImages()
+        );
+
+        // 4) 다운로드 수행(스캔/정책검증 없이 즉시 실행)
+        // - 성공 시 로컬에 manifest/blobs/config 산출물 생성
+        DownloadResult downloaded = manifestService.downloadByEcrApi(downloadReq);
+
+        // 5) tar export 수행(로컬 산출물 기반)
+        EcrDockerSaveExportResult exported = dockerSaveExportService.exportDockerSaveTarFromLocal(req);
+
+        // 6) 생성된 tar 경로
+        Path tar = exported.tarPath();
+
+        // 7) 응답 파일명/서버 내부 경로
+        String fileName = tar.getFileName().toString();
+        String serverTarPath = tar.toAbsolutePath().toString();
+
+        // 8) 결과 로깅(민감정보 최소화)
+        log.info("ECR direct download+export docker-save OK. repo={}, resolvedTag={}, resolvedDigest={}, tar={}",
+                req.repositoryName(),
+                Objects.toString(downloaded.resolvedTag(), "(null)"),
+                Objects.toString(downloaded.resolvedDigest(), "(null)"),
+                serverTarPath
+        );
+
+        // 9) 파일 다운로드 응답 구성
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + fileName + "\"")
                 .header("X-Server-Tar-Path", serverTarPath)
@@ -210,7 +367,7 @@ public class EcrController {
         Instant expiresAt = Instant.now().plus(SCAN_CACHE_TTL);
 
         // 2) 스캔 결과를 repo 단위로 캐시에 저장
-        //    - null/blank 방어
+        // - null/blank 방어
         for (EcrRepoItem it : items) {
             if (it == null || StringUtils.isBlank(it.repositoryName())) continue;
 
@@ -243,7 +400,7 @@ public class EcrController {
         }
 
         // 4) 캐시 miss/expired → 단건 스캔 수행
-        //    - 스캔 요청 DTO는 download 요청의 credential/region/accountId를 재사용
+        // - 스캔 요청 DTO는 download 요청의 credential/region/accountId를 재사용
         EcrRepoScanRequest scanReq = new EcrRepoScanRequest(
                 req.region(),
                 req.accountId(),

@@ -62,7 +62,7 @@ public class EcrRepoScanApplicationService {
             List<Repository> repos = listAllRepositories(ecr, req.accountId());
 
             // 3) repo별로 latest(또는 최신으로 간주되는) 태그 계산
-            //    - 각 repo 스캔은 budget/time-limit가 걸려 있어 전체 요청이 무한 지연되지 않도록 함
+            // - 각 repo 스캔은 budget/time-limit가 걸려 있어 전체 요청이 무한 지연되지 않도록 함
             List<EcrRepoItem> items = new ArrayList<>(repos.size());
             for (Repository r : repos) {
                 // repo 단위 결과(태그/시간/pullable/reason) 계산
@@ -198,12 +198,12 @@ public class EcrRepoScanApplicationService {
      */
     private RepoLatestTagResult computeLatestTagForRepo(EcrClient ecr, String accountId, String repositoryName) {
         // 1) TAGGED 이미지를 대상으로 “가장 최근 pushedAt”을 찾는 스캔 수행
-        //    - 시간/페이지 budget을 초과하면 TIMED_OUT_OR_LIMITED로 종료
+        // - 시간/페이지 budget을 초과하면 TIMED_OUT_OR_LIMITED로 종료
         LatestScanResult scan = scanLatestTaggedImage(ecr, accountId, repositoryName);
 
         // 2) 스캔 결과를 상태별로 해석하여 최종 DTO로 변환
-        //    - pullable: 실제로 repositoryUri:tag 형태로 pull 가능한지 여부
-        //    - reason: pullable=false인 경우 사유 코드(모니터링/디버깅/프론트 표시용)
+        // - pullable: 실제로 repositoryUri:tag 형태로 pull 가능한지 여부
+        // - reason: pullable=false인 경우 사유 코드(모니터링/디버깅/프론트 표시용)
         return switch (scan.status()) {
             case NO_TAGGED_IMAGES -> new RepoLatestTagResult(
                     null,
@@ -236,7 +236,7 @@ public class EcrRepoScanApplicationService {
 
             case OK -> {
                 // 3) 가장 최근 pushedAt 이미지의 태그들 중 “repo 주소로 사용할 태그” 선택
-                //    - tags에 latest가 있으면 latest를 우선, 없으면 첫 번째 태그
+                // - tags에 latest가 있으면 latest를 우선, 없으면 첫 번째 태그
                 String tag = pickTagForRepoAddr(scan.bestTags());
 
                 // 4) 최신 이미지가 태그가 없는 경우(태그 해제/특수 상태) 방어
@@ -304,7 +304,7 @@ public class EcrRepoScanApplicationService {
             pages++;
 
             // C) TAGGED 이미지만 조회
-            //    - UNTAGGED(태그 없는) 이미지는 “repo:tag” 형태로 pull 불가이므로 제외
+            // - UNTAGGED(태그 없는) 이미지는 “repo:tag” 형태로 pull 불가이므로 제외
             DescribeImagesResponse resp = ecr.describeImages(
                     DescribeImagesRequest.builder()
                             .registryId(accountId)
@@ -345,7 +345,7 @@ public class EcrRepoScanApplicationService {
         } while (nextToken != null);
 
         // G) 스캔 종료 후 결과 분기
-        //    - bestPushedAt이 없으면: (1) TAGGED는 있었는데 pushedAt이 없음, 또는 (2) TAGGED 자체가 없음
+        // - bestPushedAt이 없으면: (1) TAGGED는 있었는데 pushedAt이 없음, 또는 (2) TAGGED 자체가 없음
         if (bestPushedAt == null) {
             if (sawTagged) {
                 return new LatestScanResult(ScanStatus.TAGGED_BUT_NO_PUSHED_AT, null, List.of());
@@ -407,7 +407,7 @@ public class EcrRepoScanApplicationService {
             Objects.requireNonNull(status, "status");
 
             // bestTags는 외부 리스트 참조를 그대로 들고 있지 않도록 방어적 복사
-            // - 이후 호출자가 리스트를 수정해도 내부 상태가 변하지 않음(불변성)
+            // - 이후 호출자가 리스트를 수정해도 내부 상태가 변하지 않음
             bestTags = (bestTags == null) ? List.of() : List.copyOf(bestTags);
         }
     }

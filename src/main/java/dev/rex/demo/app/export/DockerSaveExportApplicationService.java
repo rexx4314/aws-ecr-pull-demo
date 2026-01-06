@@ -28,7 +28,6 @@ import java.util.Objects;
  * - 파일 시스템 작업 예외를 ApiException으로 래핑
  *
  * <p>
- * Clean Code 리팩터링 포인트:
  * - 메서드 분리(검증/로딩/파싱/경로결정/입력구성)
  * - early return/guard clause 유지
  * - 예외(ErrorCode) 매핑 정책 유지
@@ -77,49 +76,49 @@ public class DockerSaveExportApplicationService {
         final ResolvedRef ref = resolveRef(req);
 
         // 4) 다운로드 산출물 레이아웃 생성:
-        //    - download 단계에서 만든 경로 구조와 동일해야 로컬 산출물을 정확히 찾을 수 있음
+        // - download 단계에서 만든 경로 구조와 동일해야 로컬 산출물을 정확히 찾을 수 있음
         final DownloadLayout layout = buildLayout(req, outputBaseDir, ref);
 
         // 5) 레이아웃에서 로컬 산출물 경로 묶음으로 변환(파라미터/가독성 개선)
         final LocalArtifacts artifacts = resolveArtifacts(layout);
 
         // 6) 필수 파일 존재 여부 검증:
-        //    - manifest.json은 항상 필요
-        //    - includeConfig=true면 config.json도 필요
+        // - manifest.json은 항상 필요
+        // - includeConfig=true면 config.json도 필요
         validateRequiredFiles(req, artifacts);
 
         // 7) manifest.json 로드(파일 읽기 실패는 ApiException으로 래핑)
         final String manifestJson = readManifestJson(artifacts.ecrManifestPath());
 
         // 8) manifest 파싱 + 정책 검증:
-        //    - manifest list(멀티 아키텍처)는 현재 export 정책상 미지원
+        // - manifest list(멀티 아키텍처)는 현재 export 정책상 미지원
         final ParsedManifest parsed = parseAndValidateManifest(manifestJson);
 
         // 9) 레이어 목록 추출/검증: layers가 비어있으면 docker-save로 만들 수 없음
         final List<String> layerDigests = validateAndGetLayerDigests(parsed);
 
         // 10) docker-save에서 사용할 repoTag 결정:
-        //     - req.repoTag 우선
-        //     - 없으면 (repoName + ":" + tag) 자동 구성 시도
-        //     - 둘 다 불가하면 INVALID_REQUEST
+        // - req.repoTag 우선
+        // - 없으면 (repoName + ":" + tag) 자동 구성 시도
+        // - 둘 다 불가하면 INVALID_REQUEST
         final String repoTag = resolveRepoTag(req);
 
         // 11) export 출력 디렉토리 생성:
-        //     - {imageDir}/export/docker-save
+        // - {imageDir}/export/docker-save
         final Path exportDir = resolveExportDir(artifacts.imageDir());
         mkdirs(exportDir);
 
         // 12) tar 파일명 결정:
-        //     - fileNameHint 우선
-        //     - 없으면 docker-save_{repoTag}.tar 기본값
-        //     - 파일시스템 안전한 이름으로 정규화(safeTarFileName)
+        // - fileNameHint 우선
+        // - 없으면 docker-save_{repoTag}.tar 기본값
+        // - 파일시스템 안전한 이름으로 정규화(safeTarFileName)
         final String tarFileName = resolveTarFileName(req, repoTag);
 
         // 13) 최종 tar 경로 확정
         final Path tarPath = exportDir.resolve(tarFileName);
 
         // 14) tarWriter 입력 구성:
-        //     - imageDir/manifest/config/repotag/layers/includeConfig/verifySha256 를 모아 전달
+        // - imageDir/manifest/config/repotag/layers/includeConfig/verifySha256 를 모아 전달
         final DockerSaveTarWriter.Input input = buildWriterInput(req, artifacts, repoTag, layerDigests);
 
         // 15) tar 생성 실행(실제 파일 작성/검증은 tarWriter 내부에서 수행)
@@ -135,7 +134,7 @@ public class DockerSaveExportApplicationService {
 
     /**
      * 정책 검증:
-     * - export는 로컬 산출물 기반. 최신 태그 해석(resolveLatest)은 허용하지 않음.
+     * - export는 로컬 산출물 기반. 최신 태그 해석(resolveLatest)은 허용하지 않음
      */
     private void validatePolicy(EcrDockerSaveExportRequest req) {
         // 정책상 금지된 옵션을 조기에 차단하여 “왜 실패했는지”를 명확히 함

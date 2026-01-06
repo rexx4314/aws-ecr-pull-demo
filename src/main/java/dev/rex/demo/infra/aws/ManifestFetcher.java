@@ -71,7 +71,7 @@ public class ManifestFetcher {
             );
 
             // 3) 응답 검증: manifest가 없으면 "요청한 이미지가 없다/조회 불가"로 처리
-            //    - AWS가 images 대신 failures 리스트로 내려주는 케이스도 있어 방어적으로 검사
+            // - AWS가 images 대신 failures 리스트로 내려주는 케이스도 있어 방어적으로 검사
             String manifest = extractManifestOrNull(resp);
             if (manifest == null) {
                 throw new ApiException(
@@ -146,7 +146,7 @@ public class ManifestFetcher {
 
         List<Image> images = resp.images();
         if (images == null || images.isEmpty()) {
-            // failures가 존재할 수 있으나, 메시지/코드 매핑은 상위에서 처리(일관성)
+            // failures가 존재할 수 있으나, 메시지/코드 매핑은 상위에서 처리
             return null;
         }
 

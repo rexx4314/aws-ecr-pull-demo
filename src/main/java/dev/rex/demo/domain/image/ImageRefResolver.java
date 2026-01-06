@@ -181,7 +181,7 @@ public class ImageRefResolver {
             }
 
             // B) TAGGED 이미지 목록 조회
-            //    - filter(tagStatus=TAGGED)로 태그 없는 이미지 제외
+            // - filter(tagStatus=TAGGED)로 태그 없는 이미지 제외
             DescribeImagesResponse resp = ecr.describeImages(
                     DescribeImagesRequest.builder()
                             .registryId(registryId)
@@ -249,7 +249,7 @@ public class ImageRefResolver {
             if (resp.imageDetails() == null || resp.imageDetails().isEmpty()) return null;
 
             // 3) 첫 번째 결과의 digest 반환
-            //    (동일 tag가 여러 digest를 가질 수 없다는 전제: ECR의 tag는 특정 이미지에 매핑)
+            // (동일 tag가 여러 digest를 가질 수 없다는 전제: ECR의 tag는 특정 이미지에 매핑)
             return resp.imageDetails().get(0).imageDigest();
 
         } catch (EcrException ex) {
