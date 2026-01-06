@@ -16,27 +16,30 @@
 ## 2. 아키텍처 개요
 
 ```
+
 Client (IntelliJ HTTP Client)
-        ↓
+↓
 Spring Boot API
-        ↓
+↓
 AWS SDK (ECR)
- - DescribeRepositories
- - ListImages / DescribeImages        (scan: 최신 tag 계산)
- - BatchGetImage                     (manifest 조회)
- - GetAuthorizationToken             (ECR Basic token)
- - GetDownloadUrlForLayer            (layer/config 다운로드 URL)
-        ↓
-HTTP Stream Download (Pre-signed URL)
- - manifest.json 저장
- - blobs(레이어) 저장
- - config.json 저장(옵션)
-        ↓
-Local File System (./out)
-        ↓
-Export (Docker Save Tar)
- - 로컬(out) 기반 tar 생성
- - tar 스트리밍 다운로드
+
+* DescribeRepositories
+* ListImages / DescribeImages        (scan: 최신 tag 계산)
+* BatchGetImage                     (manifest 조회)
+* GetAuthorizationToken             (ECR Basic token)
+* GetDownloadUrlForLayer            (layer/config 다운로드 URL)
+  ↓
+  HTTP Stream Download (Pre-signed URL)
+* manifest.json 저장
+* blobs(레이어) 저장
+* config.json 저장(옵션)
+  ↓
+  Local File System (./out)
+  ↓
+  Export (Docker Save Tar)
+* 로컬(out) 기반 tar 생성
+* tar 스트리밍 다운로드
+
 ```
 
 * 다운로드 산출물 저장 위치: 프로젝트 디렉터리 `./out`
@@ -77,37 +80,39 @@ Export (Docker Save Tar)
 ※ digest-{digest}/ 디렉터리는 digest 기준으로 다운로드 요청한 경우에만 생성됩니다.
 
 ```
+
 out/
- └─ {accountId}/
-    └─ {region}/
-       └─ {repositoryName}/
-          ├─ tag-{tag}/
-          │  │  manifest.json
-          │  │  config.json                (includeConfig=true)
-          │  │
-          │  ├─ blobs/
-          │  │  └─ sha256/
-          │  │        <digest1>
-          │  │        <digest2>
-          │  │        ...
-          │  │
-          │  └─ export/
-          │     └─ docker-save/
-          │           docker-save_<tag>.tar
-          │
-          └─ digest-{digest}/
-             │  manifest.json
-             │  config.json                (includeConfig=true)
-             │
-             ├─ blobs/
-             │  └─ sha256/
-             │        <digest1>
-             │        <digest2>
-             │        ...
-             │
-             └─ export/
-                └─ docker-save/
-                      docker-save_<hint>.tar
+└─ {accountId}/
+└─ {region}/
+└─ {repositoryName}/
+├─ tag-{tag}/
+│  │  manifest.json
+│  │  config.json                (includeConfig=true)
+│  │
+│  ├─ blobs/
+│  │  └─ sha256/
+│  │        <digest1>
+│  │        <digest2>
+│  │        ...
+│  │
+│  └─ export/
+│     └─ docker-save/
+│           docker-save_<tag>.tar
+│
+└─ digest-{digest}/
+│  manifest.json
+│  config.json                (includeConfig=true)
+│
+├─ blobs/
+│  └─ sha256/
+│        <digest1>
+│        <digest2>
+│        ...
+│
+└─ export/
+└─ docker-save/
+docker-save_<hint>.tar
+
 ```
 
 저장되는 파일:
@@ -127,19 +132,21 @@ out/
 * download 가능 여부 판단
 
 ```
+
 POST /api/ecr/scan
-```
+
+````
 
 요청 예시
 
 ```json
 {
   "region": "ap-northeast-2",
-  "accountId": "194356581254",
+  "accountId": "123456789012",
   "accessKeyId": "AKIA...",
   "secretAccessKey": "xxxx"
 }
-```
+````
 
 응답 예시(요약)
 
@@ -185,7 +192,7 @@ POST /api/ecr/download
 ```json
 {
   "region": "ap-northeast-2",
-  "accountId": "194356581254",
+  "accountId": "123456789012",
   "accessKeyId": "AKIA...",
   "secretAccessKey": "xxxx",
   "repositoryName": "demo/rex-repo",
@@ -223,7 +230,7 @@ POST /api/ecr/download
 * pullable=false Repository는 다운로드 차단
 * resolveLatest=false + tag 직접 지정 시
 
-    * 최신 tag가 아니면 TAG_NOT_LATEST 오류 반환
+  * 최신 tag가 아니면 TAG_NOT_LATEST 오류 반환
 
 ---
 
@@ -243,7 +250,7 @@ POST /api/ecr/export/docker-save
 ```json
 {
   "region": "ap-northeast-2",
-  "accountId": "194356581254",
+  "accountId": "123456789012",
   "accessKeyId": "AKIA...",
   "secretAccessKey": "xxxx",
   "repositoryName": "demo/rex-repo",
@@ -269,15 +276,114 @@ POST /api/ecr/export/docker-save
 
 ---
 
+### 5.4 레이어 다운로드 (Direct, 스캔/정책검증 생략)
+
+* 목적: repo/tag(or digest) + AWS 인증정보를 입력받아 **즉시 다운로드**
+* 차이점(/download 대비):
+
+  * /scan, 캐시 조회, pullable 검증, TAG_NOT_LATEST 정책 검증을 **모두 생략**
+  * 실제 존재 여부/권한/네트워크 오류 등은 다운로드 과정에서 실패할 수 있음(ApiException)
+
+```
+POST /api/ecr/download/direct
+```
+
+요청 예시
+
+```json
+{
+  "region": "ap-northeast-2",
+  "accountId": "123456789012",
+  "accessKeyId": "AKIA...",
+  "secretAccessKey": "xxxx",
+  "repositoryName": "demo/rex-repo",
+  "tag": "v1",
+  "resolveLatest": false,
+  "includeConfig": true,
+  "verifySha256": true,
+  "concurrency": 4,
+  "maxRetries": 4,
+  "httpTimeoutSeconds": 180,
+  "outputDir": "./out",
+  "maxPages": 50,
+  "maxImages": 2000
+}
+```
+
+응답 형식은 `/api/ecr/download`와 동일
+
+---
+
+### 5.5 (단일 호출) Direct 다운로드 + docker save tar(export)
+
+* 목적: **한 번의 호출로 “즉시 다운로드 → docker save tar 생성/다운로드”까지 수행**
+* 재사용:
+
+  * 요청 DTO는 `EcrDockerSaveExportRequest`를 사용
+  * 내부에서 다운로드를 수행한 뒤, 동일 요청 기반으로 export를 수행
+* 차이점(기존 /download + /export/docker-save 대비):
+
+  * /scan, 캐시, pullable 검증, TAG_NOT_LATEST 정책 검증을 **모두 생략**
+  * 다운로드 실패 시 export도 불가(로컬 산출물 기반)
+
+```
+POST /api/ecr/download/direct/docker-save
+```
+
+요청 예시
+
+```json
+{
+  "region": "ap-northeast-2",
+  "accountId": "123456789012",
+  "accessKeyId": "AKIA...",
+  "secretAccessKey": "xxxx",
+  "repositoryName": "demo/rex-repo",
+  "tag": "v1",
+  "resolveLatest": false,
+  "includeConfig": true,
+  "verifySha256": true,
+  "outputDir": "./out",
+  "repoTag": "demo/rex-repo:v1",
+  "fileNameHint": "docker-save_v1.tar",
+  "httpTimeoutSeconds": 180,
+  "maxRetries": 4,
+  "maxPages": 50,
+  "maxImages": 2000
+}
+```
+
+응답 헤더 예시(성공 시)
+
+* Content-Type: application/x-tar
+* Content-Disposition: attachment; filename="docker-save_v1.tar"
+* X-Server-Tar-Path: 서버에 생성된 tar 절대 경로
+
+---
+
 ## 6. IntelliJ HTTP Client 테스트 순서
 
-1. /api/ecr/scan
+### 6.1 기본 흐름(정책/검증 포함)
+
+1. `/api/ecr/scan`
 2. pullable=true Repository 선택
-3. /api/ecr/download
-4. /api/ecr/export/docker-save
+3. `/api/ecr/download`
+4. `/api/ecr/export/docker-save`
+
+### 6.2 Direct 흐름(스캔/정책검증 생략)
+
+* 즉시 다운로드:
+
+  1. `/api/ecr/download/direct`
+
+* 단일 호출로 tar까지:
+
+  1. `/api/ecr/download/direct/docker-save`
+
+공통:
 
 * IntelliJ의 **Save Response** 기능으로 tar 저장
-* X-Server-Tar-Path 헤더로 서버 파일 위치 확인
+* `X-Server-Tar-Path` 헤더로 서버 파일 위치 확인
 
 테스트 스크립트
 
