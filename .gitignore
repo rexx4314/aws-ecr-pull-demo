@@ -35,3 +35,8 @@ out/
 
 ### VS Code ###
 .vscode/
+
+### HTTP client — 자격증명은 추적하지 않는다 ###
+# 규격은 개인 룰 `http-execution-rules` 를 따른다: 추적되는 http-client.env.json 에는
+# 빈 placeholder 만 두고, 실값은 아래 private 파일에만 둔다.
+**/http-client.private.env.json
